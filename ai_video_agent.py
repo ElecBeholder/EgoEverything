@@ -19,9 +19,9 @@ from openai import OpenAI
 
 # 配置
 device = "cuda:0"
-#VIDEO_PATH = "Data/loc5_script4_seq6_rec1/loc5_script4_seq6_rec1.mp4"
-VIDEO_PATH = "Data/loc3_script5_seq6_rec1/loc3_script5_seq6_rec1.mp4"
-#VIDEO_PATH = "Data/loc4_script1_seq1_rec1/loc4_script1_seq1_rec1.mp4"
+#VIDEO_PATH = "/home/wang/AriaEveryday_activaties/loc5_script4_seq6_rec1/loc5_script4_seq6_rec1.mp4"
+VIDEO_PATH = "/home/wang/AriaEveryday_activaties/loc3_script5_seq6_rec1/loc3_script5_seq6_rec1.mp4"
+#VIDEO_PATH = "/home/wang/AriaEveryday_activaties/loc4_script1_seq1_rec1/loc4_script1_seq1_rec1.mp4"
 OPENROUTER_API_KEY = "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"
 
 def log_timestamp(message):
