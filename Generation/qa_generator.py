@@ -1,0 +1,482 @@
+#!/usr/bin/env python3
+"""
+Question-Answer generation using LLM with tool calling
+"""
+import json
+import re
+import os
+from typing import List, Dict, Any, Optional, Tuple
+from openai import OpenAI
+try:
+    from .utils import log_message, encode_image_to_base64, safe_get_response_content, safe_get_token_usage
+    from .frame_extractor import FrameExtractor, SegmentFeatureExtractor
+except ImportError:
+    import sys
+    import os
+    sys.path.append(os.path.dirname(__file__))
+    from utils import log_message, encode_image_to_base64, safe_get_response_content, safe_get_token_usage
+    from frame_extractor import FrameExtractor, SegmentFeatureExtractor
+
+
+class QAGenerator:
+    """Generates question-answer pairs using LLM with tool calling"""
+    
+    def __init__(self, api_key: str):
+        self.client = OpenAI(
+            api_key=api_key,
+            base_url="https://openrouter.ai/api/v1"
+        )
+        self.frame_extractor = FrameExtractor()
+        self.segment_extractor = SegmentFeatureExtractor()
+        self.total_tokens = {'prompt_tokens': 0, 'completion_tokens': 0, 'total_tokens': 0}
+    
+    def setup_tools_and_system_message(self) -> Tuple[List[Dict[str, Any]], str]:
+        """Setup tools and system message for QA generation - keep original unchanged"""
+        tools = [
+            {
+                "type": "function",
+                "function": {
+                    "name": "REFINE_SEGMENT",
+                    "description": "Samples multiple frames within a specified timestamp range and returns them in chronological order for visual analysis.",
+                    "parameters": {
+                        "type": "object",
+                        "properties": {
+                            "start_second": {"type": "number", "description": "Start time in seconds"},
+                            "end_second": {"type": "number", "description": "End time in seconds"}
+                        },
+                        "required": ["start_second", "end_second"]
+                    }
+                }
+            },
+            {
+                "type": "function",
+                "function": {
+                    "name": "REFINE_FRAME",
+                    "description": "Extracts a specific frame at the given timestamp and returns the actual image for visual analysis",
+                    "parameters": {
+                        "type": "object",
+                        "properties": {
+                            "timestamp_second": {"type": "number", "description": "Timestamp in seconds to extract the frame image"}
+                        },
+                        "required": ["timestamp_second"]
+                    }
+                }
+            }
+        ]
+        
+        # Keep original system message unchanged
+        system_message = """##Overall Task
+Imagine you are a user who has been wearing an AR/VR headset for an extended period, during which the device continuously recorded your surroundings. From this full recording, I will select a short clip: video V. Your job is to envision a daily-life scenario S that occurs any amount of time after the events shown in video V have ended.
+
+Within this scenario S, think of a question Q that the user might naturally ask the AR/VR device; the answer to this question must require the device to review video V. The question Q should be rooted in everyday life, described as unambiguously as possible, and fully consistent with scenario S. Then provide the correct answer A to that question. Answer A must be absolutely accurate and unambiguous.
+
+## Context you will receive
+1. **Segment list**: an ordered set of action descriptions in video V with timestamp. 
+2. **QA key frame**: a single frame image from video V with timestamp, showing visual content at that moment.
+3. **Selected Object**: One object from the key frame has been specifically chosen, with its bounding box coordinates. Your eventual question or answer **MUST** be related to this selected object.
+**CRITICAL** The analysis may contain errors, please cross-verify all facts using independent sources.
+
+## Tools you can call
+You **CANNOT** see raw video, but you can make openai style function calls to gather more information:
+
+**REFINE_SEGMENT(start_second, end_second)**  
+ • Extracts multiple frames within a specified timestamp range
+ • Returns actual frames in chronological order for visual analysis
+ • Best for understanding: movements, actions, interactions over time
+ • Use when you need to know "what happened when"
+
+**REFINE_FRAME(timestamp_second)**  
+ • Extracts a single frame at the specified timestamp for visual analysis.
+ • Returns the actual frame image at that timestamp
+ • Best for understanding: what objects are present, their properties, spatial layout
+ • Use when you need to know "what objects were there at that moment"
+
+##Complete overall task in following steps
+1. Analyze full segment list and the QA key-frame image. Identify the selected object information provided in the context.
+2. Brainstorm situations in which you might ask the device a daily-life question that requires information from the video V to answer.
+3. Use the REFINE_SEGMENT and REFINE_FRAME tools to gather additional information needed for giving the question and answer.
+ • After each function response, briefly reflect on what you learned before deciding whether another call is necessary.
+ • Feel free to chain function calls: study responses, think, then request another refinement until you believe you understand enough to craft a good question-and-answer pair.
+4. Use the given tools to cross-verify each facts in QA.
+ • **CRITICAL** Questions and Answers must be supported by facts from at least **TWO** independent sources (frames or segment analyses)
+ • **DO NOT** use duplicate timestamps for cross-verify; instead, you may use other timestamps for frame refine verification or different time intervals for segment refine verification.
+5. When satisfied, produce your final output (see format below) and stop calling function.
+ • Strictly follow the required format and do not generate any additional content.
+ • **CRITICAL** The question or answer **MUST** be related to this selected object.
+
+##Final output format
+scenario:
+<one-sentence description of the daily-life scenario when the user would ask>
+Question:
+<what the user says to the AR/VR assistant>
+Answer:
+<absolutely accurate and unambiguous answer to the Question>
+Evidence:
+<quote to frame or segment refine for cross-verify and QA evidence>
+
+##Important Notes (**CRITICAL**)
+1. Regarding scenario:
+ • It must depict an everyday situation.
+ • Scenario S should take place some time after video V ends. It does not have to be directly related to video V, but the question Q must be relevant to Scenario S.
+2. Regarding QA:
+ • Descriptions must be precise and answers absolutely correct. Use enough qualifiers (location, appearance) to make each object unambiguous.
+ • Q or A must involve selected object.
+ • No speculation: the absence of evidence in the video does not prove something never happened.
+ • Q should be realistic, as if asked by an actual user.
+ • If these conditions cannot be met, create a new QA pair.
+3. Regarding Evidence:
+ • Every fact in the QA must be backed by at least two independent information sources. If this cannot be satisfied, create a new QA pair.
+4. output:
+ • Never invent facts, rely only on the provided descriptions.
+ • **CRITICAL** Use the standard OpenAI function-calling format for tool calls; do not invoke tools with plain text."""
+        
+        return tools, system_message
+    
+    def create_initial_message(self, keyframe_path: str, timestamp: float, 
+                             video_summary: str, selected_object: Dict[str, Any]) -> List[Dict[str, Any]]:
+        """Create initial message with keyframe and context"""
+        # Format selected object info
+        selected_object_info = ""
+        if selected_object:
+            gemini_bbox = selected_object.get('gemini_bbox', selected_object['normalized_bbox'])
+            selected_object_info = f"""
+Selected Object for Question Focus:
+Object Name: {selected_object['name']}
+Object Bounding Box: {gemini_bbox} (format: [ymin, xmin, ymax, xmax], normalized 0-1000)
+"""
+        
+        user_prompt = f"""Here is the QA key-frame image:
+This is a key frame sampled from video at {timestamp:.1f} seconds.
+{selected_object_info}
+Here is the Full segment list description:
+{video_summary}"""
+        
+        base64_image = encode_image_to_base64(keyframe_path)
+        
+        return [
+            {
+                "role": "user", 
+                "content": [
+                    {"type": "text", "text": user_prompt},
+                    {
+                        "type": "image_url",
+                        "image_url": {
+                            "url": base64_image
+                        }
+                    }
+                ]
+            }
+        ]
+    
+    def handle_refine_segment(self, func_call: Dict[str, Any], video_path: str, 
+                             temp_dir: str) -> Tuple[str, List[str]]:
+        """Handle REFINE_SEGMENT function call"""
+        args = json.loads(func_call['arguments'])
+        start_second = float(args["start_second"])
+        end_second = float(args["end_second"])
+        
+        log_message(f"REFINE_SEGMENT requested: {start_second}s - {end_second}s")
+        
+        try:
+            # Get representative frames using clustering
+            representative_frames = self.segment_extractor.get_representative_frames(
+                video_path, start_second, end_second, n_clusters=10, temp_dir=temp_dir
+            )
+            
+            if not representative_frames:
+                return f"Cannot extract representative frames from {start_second}s - {end_second}s", []
+            
+            # Extract and save representative frames
+            frame_paths = []
+            frame_descriptions = []
+            
+            for frame_data in representative_frames:
+                timestamp = frame_data['timestamp']
+                cluster_id = frame_data['cluster_id']
+                
+                try:
+                    frame_path = self.frame_extractor.extract_frame_at_timestamp(
+                        video_path, timestamp, temp_dir
+                    )
+                    
+                    # Rename for better identification
+                    new_name = f"segment_{start_second:.1f}-{end_second:.1f}s_cluster_{cluster_id}_{timestamp:.1f}s.jpg"
+                    new_path = os.path.join(temp_dir, new_name)
+                    os.rename(frame_path, new_path)
+                    
+                    frame_paths.append(new_path)
+                    frame_descriptions.append(f"{timestamp:.1f}s")
+                    
+                except Exception as e:
+                    log_message(f"Failed to extract frame at {timestamp}s: {str(e)}")
+            
+            if not frame_paths:
+                return f"Cannot extract valid frames from {start_second}s - {end_second}s", []
+            
+            # Create response text
+            response_text = f"Analysis completed. Representative frames from {start_second}s - {end_second}s:"
+            for i, desc in enumerate(frame_descriptions, 1):
+                response_text += f"\n{i}. {desc}"
+            
+            return response_text, frame_paths
+            
+        except Exception as e:
+            error_msg = f"Error analyzing segment {start_second}-{end_second}: {str(e)}"
+            log_message(error_msg)
+            return error_msg, []
+    
+    def handle_refine_frame(self, func_call: Dict[str, Any], video_path: str, 
+                           temp_dir: str) -> Tuple[str, str]:
+        """Handle REFINE_FRAME function call"""
+        args = json.loads(func_call['arguments'])
+        timestamp_second = float(args["timestamp_second"])
+        
+        log_message(f"REFINE_FRAME requested: {timestamp_second}s")
+        
+        try:
+            frame_path = self.frame_extractor.extract_frame_at_timestamp(
+                video_path, timestamp_second, temp_dir
+            )
+            
+            # Rename for better identification
+            new_name = f"refine_frame_{timestamp_second:.1f}s.jpg"
+            new_path = os.path.join(temp_dir, new_name)
+            os.rename(frame_path, new_path)
+            
+            response_text = f"Frame extracted at {timestamp_second}s from video. Image available for analysis."
+            
+            return response_text, new_path
+            
+        except Exception as e:
+            error_msg = f"Error analyzing frame at {timestamp_second}s: {str(e)}"
+            log_message(error_msg)
+            return error_msg, ""
+    
+    def make_api_call(self, messages: List[Dict[str, Any]], tools: List[Dict[str, Any]]) -> Any:
+        """Make API call to LLM"""
+        response = self.client.chat.completions.create(
+            model="google/gemini-2.5-pro",
+            messages=messages,
+            tools=tools,
+            tool_choice="auto",
+            temperature=1,
+            max_tokens=65536
+        )
+        
+        # Track token usage
+        token_usage = safe_get_token_usage(response)
+        if token_usage:
+            for key in self.total_tokens:
+                self.total_tokens[key] += token_usage[key]
+        
+        return response
+    
+    def generate_qa(self, video_path: str, keyframe_path: str, timestamp: float,
+                   video_summary: str, selected_object: Dict[str, Any], 
+                   temp_dir: str) -> str:
+        """Generate QA pair using LLM with tool calling"""
+        log_message("Starting QA generation")
+        
+        # Setup tools and system message
+        tools, system_message = self.setup_tools_and_system_message()
+        
+        # Create initial messages
+        messages = [
+            {"role": "system", "content": system_message}
+        ]
+        messages.extend(self.create_initial_message(keyframe_path, timestamp, video_summary, selected_object))
+        
+        # Initial API call
+        response = self.make_api_call(messages, tools)
+        
+        # Process function calls iteratively
+        max_iterations = 10
+        iteration_count = 0
+        
+        while iteration_count < max_iterations:
+            iteration_count += 1
+            
+            # Check for tool calls
+            has_tool_calls = (hasattr(response.choices[0].message, 'tool_calls') and 
+                            response.choices[0].message.tool_calls)
+            
+            response_content = safe_get_response_content(response)
+            
+            # Parse text-based function calls if no tool calls
+            text_function_calls = []
+            if not has_tool_calls and response_content:
+                text_function_calls = self._parse_text_function_calls(response_content)
+            
+            # If no function calls, break the loop
+            if not has_tool_calls and not text_function_calls:
+                break
+            
+            # Process function calls
+            if has_tool_calls:
+                messages.append(response.choices[0].message)
+                
+                for tool_call in response.choices[0].message.tool_calls:
+                    self._process_tool_call(tool_call, messages, video_path, temp_dir)
+                    
+            else:
+                # Handle text-based function calls
+                messages.append({"role": "assistant", "content": response_content})
+                
+                for i, func_call in enumerate(text_function_calls):
+                    mock_tool_call = type('obj', (object,), {
+                        'id': f"text_call_{iteration_count}_{i}",
+                        'function': type('obj', (object,), {
+                            'name': func_call['name'],
+                            'arguments': json.dumps(func_call['parameters'])
+                        })()
+                    })()
+                    
+                    self._process_tool_call(mock_tool_call, messages, video_path, temp_dir)
+            
+            # Make next API call
+            response = self.make_api_call(messages, tools)
+        
+        # Get final result
+        final_result = safe_get_response_content(response)
+        
+        if not final_result:
+            log_message("No final result, requesting continuation")
+            continue_messages = messages + [{"role": "user", "content": "Continue your analysis."}]
+            response = self.make_api_call(continue_messages, tools)
+            final_result = safe_get_response_content(response)
+        
+        if not final_result:
+            final_result = "QA generation failed to complete"
+        
+        log_message("QA generation completed")
+        log_message(f"Total tokens used: {self.total_tokens['total_tokens']}")
+        
+        return final_result
+    
+    def _parse_text_function_calls(self, response_content: str) -> List[Dict[str, Any]]:
+        """Parse function calls from text response"""
+        function_calls = []
+        
+        try:
+            # Pattern for complete function call format
+            full_pattern = r'\{[^{}]*"type"[^{}]*"function"[^{}]*"name"[^{}]*"parameters"[^{}]*\{[^{}]*\}[^{}]*\}'
+            full_matches = re.findall(full_pattern, response_content)
+            
+            # Pattern for simple function call format
+            simple_pattern = r'\{[^{}]*"name"[^{}]*"parameters"[^{}]*\{[^{}]*\}[^{}]*\}'
+            simple_matches = re.findall(simple_pattern, response_content)
+            
+            all_matches = full_matches + simple_matches
+            
+            for match in all_matches:
+                try:
+                    func_json = json.loads(match)
+                    if ("name" in func_json and "parameters" in func_json and
+                        func_json["name"] in ["REFINE_SEGMENT", "REFINE_FRAME"]):
+                        
+                        if "type" not in func_json:
+                            func_json["type"] = "function"
+                        function_calls.append(func_json)
+                except Exception:
+                    continue
+                    
+        except Exception:
+            pass
+        
+        return function_calls
+    
+    def _process_tool_call(self, tool_call: Any, messages: List[Dict[str, Any]], 
+                          video_path: str, temp_dir: str) -> None:
+        """Process individual tool call"""
+        if tool_call.function.name == "REFINE_SEGMENT":
+            response_text, frame_paths = self.handle_refine_segment(
+                {'arguments': tool_call.function.arguments}, video_path, temp_dir
+            )
+            
+            # Add tool response
+            messages.append({
+                "role": "tool",
+                "tool_call_id": tool_call.id,
+                "content": response_text
+            })
+            
+            # Add frames if available
+            if frame_paths:
+                content = [{"type": "text", "text": "Representative frames from the segment:"}]
+                for i, frame_path in enumerate(frame_paths):
+                    content.append({"type": "text", "text": f"Frame {i+1}:"})
+                    content.append({
+                        "type": "image_url",
+                        "image_url": {"url": encode_image_to_base64(frame_path)}
+                    })
+                messages.append({"role": "user", "content": content})
+                
+        elif tool_call.function.name == "REFINE_FRAME":
+            response_text, frame_path = self.handle_refine_frame(
+                {'arguments': tool_call.function.arguments}, video_path, temp_dir
+            )
+            
+            # Add tool response
+            messages.append({
+                "role": "tool",
+                "tool_call_id": tool_call.id,
+                "content": response_text
+            })
+            
+            # Add frame if available
+            if frame_path and os.path.exists(frame_path):
+                messages.append({
+                    "role": "user",
+                    "content": [
+                        {"type": "text", "text": "Here is the extracted frame:"},
+                        {
+                            "type": "image_url",
+                            "image_url": {"url": encode_image_to_base64(frame_path)}
+                        }
+                    ]
+                })
+
+
+def main():
+    """Test QA generation functionality"""
+    import argparse
+    
+    parser = argparse.ArgumentParser(description='Test QA generator')
+    parser.add_argument('--api-key', required=True, help='OpenRouter API key')
+    parser.add_argument('--video-path', required=True, help='Video file path')
+    parser.add_argument('--keyframe-path', required=True, help='Key frame image path')
+    parser.add_argument('--timestamp', type=float, required=True, help='Key frame timestamp')
+    parser.add_argument('--temp-dir', default='tmp', help='Temporary directory')
+    
+    args = parser.parse_args()
+    
+    # Create temp directory
+    os.makedirs(args.temp_dir, exist_ok=True)
+    
+    # Mock data for testing
+    mock_summary = "0.0s-30.0s: Person working at desk\n30.0s-60.0s: Person reading book"
+    mock_selected_object = {
+        'name': 'laptop',
+        'bbox': [100, 100, 300, 200],
+        'normalized_bbox': [100, 100, 300, 200],
+        'gemini_bbox': [100, 100, 300, 200]
+    }
+    
+    # Test QA generation
+    generator = QAGenerator(args.api_key)
+    
+    try:
+        result = generator.generate_qa(
+            args.video_path, args.keyframe_path, args.timestamp,
+            mock_summary, mock_selected_object, args.temp_dir
+        )
+        
+        log_message("QA Generation Result:")
+        print(result)
+        
+    except Exception as e:
+        log_message(f"QA generation test failed: {str(e)}")
+
+
+if __name__ == "__main__":
+    main() 

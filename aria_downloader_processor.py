@@ -80,6 +80,16 @@ def download_worker(download_queue, process_queue, counter, total, json_path, ou
         try:
             sequence = download_queue.get_nowait()
             counter.value += 1
+            
+            # Check if output files already exist
+            seq_dir = Path(output_dir) / sequence
+            mp4_file = seq_dir / f"{sequence}.mp4"
+            csv_file = seq_dir / f"{sequence}_tracking.csv"
+            
+            if seq_dir.exists() and mp4_file.exists() and csv_file.exists():
+                print(f"Skipping {sequence} - already processed [{counter.value}/{total}]")
+                continue
+            
             print(f"Downloading {sequence}... [{counter.value}/{total}]")
             
             cmd_vrs = ["aria_dataset_downloader", "-c", json_path, "-o", output_dir, "-l", sequence, "--data_types", "0"]
