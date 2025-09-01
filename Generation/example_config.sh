@@ -2,31 +2,22 @@
 # Example configuration script for VQA Generation Pipeline
 
 # Set your API key
-export API_KEY="sk-or-v1-your-openrouter-api-key-here"
+export API_KEY="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"
 
 # Set dataset paths
-export DATASET_PATH="/path/to/your/AriaEveryday_activities"
-export JSON_PATH="/path/to/your/AriaEverydayActivities_download_urls.json"
+export DATASET_PATH="/home/wang/AriaEveryday_activaties"
+export JSON_PATH="/home/wang/AriaEveryday_activaties/AriaEverydayActivities_download_urls.json"
 export DATASET_NAME="AriaEveryday_Activities"
 
 # Run full pipeline
-echo "Running VQA Generation Pipeline..."
-python run_vqa_generation.py \
+python main.py \
     --api-key "$API_KEY" \
     --dataset-path "$DATASET_PATH" \
     --json-path "$JSON_PATH" \
     --dataset-name "$DATASET_NAME" \
-    --limit 5 \
-    --questions-per-minute 1.0 \
+    --limit 8:10 \
+    --question-factor 4 \
+    --sampling-density 60 \
+    --n-llms 20 \
+    --qa-n-llms 60 \
     --temp-dir "tmp"
-
-echo "Pipeline completed. Check the output JSON file for results."
-
-# Example for testing single video
-# echo "Testing single video..."
-# python run_vqa_generation.py test \
-#     --api-key "$API_KEY" \
-#     --video-path "$DATASET_PATH/loc1_script1_seq1_rec1/loc1_script1_seq1_rec1.mp4" \
-#     --sequence-id "loc1_script1_seq1_rec1" \
-#     --dataset-name "$DATASET_NAME" \
-#     --temp-dir "tmp" 

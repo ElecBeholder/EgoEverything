@@ -138,11 +138,17 @@ Evidence:
         # Format selected object info
         selected_object_info = ""
         if selected_object:
-            gemini_bbox = selected_object.get('gemini_bbox', selected_object['normalized_bbox'])
+            # Safely prefer gemini_bbox, then normalized, then pixel bbox
+            gemini_bbox = selected_object.get('gemini_bbox')
+            if gemini_bbox is None:
+                gemini_bbox = selected_object.get('normalized_bbox')
+            if gemini_bbox is None:
+                gemini_bbox = selected_object.get('bbox')
+
             selected_object_info = f"""
 Selected Object for Question Focus:
-Object Name: {selected_object['name']}
-Object Bounding Box: {gemini_bbox} (format: [ymin, xmin, ymax, xmax], normalized 0-1000)
+Object Name: {selected_object.get('name', 'unknown')}
+Object Bounding Box: {gemini_bbox} (format: [ymin, xmin, ymax, xmax], normalized 0-1000 if available)
 """
         
         user_prompt = f"""Here is the QA key-frame image:

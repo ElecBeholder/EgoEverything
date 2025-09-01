@@ -6,8 +6,9 @@ import os
 import argparse
 import random
 import re
+import json
 from datetime import datetime
-from typing import List, Dict, Any, Optional
+from typing import List, Dict, Any, Optional, Tuple
 try:
     from .utils import (
         log_message, load_video_sequences, save_final_result, 
@@ -19,6 +20,7 @@ try:
     from .gaze_processor import ObjectSelector
     from .qa_generator import QAGenerator
     from .mcq_refiner import MCQRefiner
+    from .object_sampler import ObjectSampler
 except ImportError:
     import sys
     import os
@@ -33,6 +35,7 @@ except ImportError:
     from gaze_processor import ObjectSelector
     from qa_generator import QAGenerator
     from mcq_refiner import MCQRefiner
+    from object_sampler import ObjectSampler
 
 
 def extract_scenario_from_qa_response(qa_response: str) -> str:
@@ -76,65 +79,93 @@ class VQAGenerationPipeline:
         self.object_selector = ObjectSelector()
         self.qa_generator = QAGenerator(api_key)
         self.mcq_refiner = MCQRefiner(api_key)
+        self.object_sampler = ObjectSampler(api_key)
+        self.sampling_density = 60.0
+        self.qa_n_llms = 30
         
         # Create base temp directory
         os.makedirs(temp_base_dir, exist_ok=True)
     
-    def generate_single_vqa(self, video_path: str, sequence_id: str) -> Optional[Dict[str, Any]]:
+    def generate_single_vqa(self, video_path: str, sequence_id: str,
+                            preselected: Optional[Dict[str, Any]] = None,
+                            gaze_data: Optional[Any] = None,
+                            qa_generator: Optional[QAGenerator] = None,
+                            mcq_refiner: Optional[MCQRefiner] = None,
+                            video_summary_preloaded: Optional[str] = None) -> Optional[Dict[str, Any]]:
         """Generate a single VQA for a video"""
-        temp_dir = create_temp_dir(self.temp_base_dir, f"{sequence_id}_{datetime.now().strftime('%H%M%S')}")
+        # Create a per-question unique temp directory to avoid collisions across threads
+        import threading
+        unique_suffix = f"{datetime.now().strftime('%H%M%S_%f')}_{threading.get_ident()}"
+        temp_dir = create_temp_dir(self.temp_base_dir, f"{sequence_id}_{unique_suffix}")
         
         try:
             # Load video summary
-            video_summary = self.video_loader.load_video_summary(video_path)
+            video_summary = video_summary_preloaded if video_summary_preloaded is not None else self.video_loader.load_video_summary(video_path)
             if not video_summary:
                 log_message(f"No summary found for {sequence_id}, skipping")
                 return None
             
-            # Load gaze data
-            gaze_data = self.video_loader.load_gaze_data(video_path)
-            
-            # Extract random keyframe
-            keyframe_path, timestamp = self.frame_extractor.extract_random_frame(video_path, temp_dir)
-            log_message(f"Extracted keyframe at {timestamp:.1f}s: {keyframe_path}")
-            
-            # Detect objects
-            log_message("Starting object detection")
-            detection_response = self.object_detector.detect_objects(keyframe_path)
-            detected_objects = self.object_detector.parse_detection_results(detection_response, keyframe_path)
-            
-            if not detected_objects:
-                log_message("No objects detected, skipping")
-                return None
-            
-            log_message(f"Detected {len(detected_objects)} objects")
-            
-            # Select key object based on gaze
-            selected_object = self.object_selector.select_key_object(
-                detected_objects, gaze_data, timestamp, sigma=400
-            )
-            
-            if not selected_object:
-                log_message("No object selected, skipping")
-                return None
-            
-            log_message(f"Selected key object: {selected_object['name']}")
-            
-            # Create visualization
-            viz_path = self.object_detector.visualize_detections(
-                keyframe_path, detected_objects, selected_object, 
-                self.object_selector.gaze_processor.get_gaze_point_at_timestamp(gaze_data, timestamp)
-            )
+            # Load gaze if not provided
+            if gaze_data is None:
+                gaze_data = self.video_loader.load_gaze_data(video_path)
+
+            # If preselected provided, use it; otherwise, sample one via ObjectSampler
+            if preselected is not None:
+                keyframe_path = preselected['keyframe_path']
+                timestamp = preselected['timestamp']
+                selected_object = preselected['selected_object']
+                log_message(f"Using preselected keyframe {timestamp:.1f}s and object {selected_object['name']}")
+            else:
+                log_message("Sampling key frame and key object via ObjectSampler")
+                sampler_results = self.object_sampler.process_video(
+                    video_path=video_path,
+                    questions_per_minute=1.0,
+                    temp_dir=temp_dir,
+                    gaze_data=gaze_data,
+                    sampling_density=self.sampling_density,
+                    num_key_object_samples=1
+                )
+                if not sampler_results or not sampler_results.get('key_objects'):
+                    log_message("ObjectSampler returned no key objects, skipping")
+                    return None
+                sampled = sampler_results['key_objects'][0]
+                timestamp = sampled['keyframe']['timestamp']
+                keyframe_path = sampled['keyframe']['frame_path']
+                # Ensure bbox passed to QA is STRICTLY Gemini-format; fallback by converting
+                instance = sampled['instance']
+                if 'gemini_bbox' in instance and instance['gemini_bbox'] is not None:
+                    gemini_bbox = instance['gemini_bbox']
+                elif 'normalized_bbox' in instance and instance['normalized_bbox'] is not None:
+                    x0, y0, x1, y1 = instance['normalized_bbox']
+                    gemini_bbox = [y0, x0, y1, x1]
+                else:
+                    x0, y0, x1, y1 = instance['bbox']
+                    img_w = instance.get('image_width', 1) or 1
+                    img_h = instance.get('image_height', 1) or 1
+                    gemini_bbox = [
+                        int(y0 / img_h * 1000),
+                        int(x0 / img_w * 1000),
+                        int(y1 / img_h * 1000),
+                        int(x1 / img_w * 1000)
+                    ]
+                selected_object = {
+                    'name': instance['object_name'],
+                    'gemini_bbox': gemini_bbox,            # [ymin,xmin,ymax,xmax] in 0-1000
+                    'bbox': instance.get('bbox')            # pixel coords [x0,y0,x1,y1] on keyframe
+                }
+                log_message(f"Sampled keyframe {timestamp:.1f}s and object {selected_object['name']}")
             
             # Generate QA
             log_message("Starting QA generation")
-            qa_response = self.qa_generator.generate_qa(
+            local_qa_gen = qa_generator if qa_generator is not None else self.qa_generator
+            qa_response = local_qa_gen.generate_qa(
                 video_path, keyframe_path, timestamp, video_summary, selected_object, temp_dir
             )
             
             # Refine to MCQ
             log_message("Starting MCQ refinement")
-            mcq_result = self.mcq_refiner.process_qa_to_mcq(qa_response)
+            local_refiner = mcq_refiner if mcq_refiner is not None else self.mcq_refiner
+            mcq_result = local_refiner.process_qa_to_mcq(qa_response)
             
             if not mcq_result['success']:
                 log_message(f"MCQ refinement failed: {mcq_result.get('error', 'Unknown error')}")
@@ -155,7 +186,7 @@ class VQAGenerationPipeline:
                     'CoT': qa_response,  # Full Gemini output including chain of thought
                     'scenario': scenario
                 },
-                'token_usage': self.qa_generator.total_tokens['total_tokens'],
+                'token_usage': (qa_generator.total_tokens['total_tokens'] if qa_generator is not None else self.qa_generator.total_tokens['total_tokens']),
                 'question': mcq_result['refined_question'],
                 'answer': mcq_result['options'],
                 'correct': mcq_result['correct_answer_index']
@@ -172,19 +203,26 @@ class VQAGenerationPipeline:
             # Clean up temporary files
             cleanup_temp_files(temp_dir)
     
-    def calculate_questions_per_video(self, video_path: str, questions_per_minute: float) -> int:
-        """Calculate how many questions to generate for a video based on duration"""
-        duration_minutes = get_video_duration_minutes(video_path)
-        if duration_minutes == 0:
-            return 1  # Default to 1 question if duration cannot be determined
-        
-        num_questions = max(1, int(duration_minutes * questions_per_minute))
-        return num_questions
+    def calculate_questions_per_video(self, video_path: str, question_factor: int, gaze_data) -> Tuple[int, Dict[str, Any]]:
+        """Determine QA count = question_factor * unique_object_ids via ObjectSampler pre-pass"""
+        temp_dir = create_temp_dir(self.temp_base_dir, f"prepass_{datetime.now().strftime('%H%M%S')}")
+        try:
+            sampler_results = self.object_sampler.process_video(
+                video_path=video_path,
+                questions_per_minute=1.0,
+                temp_dir=temp_dir,
+                gaze_data=gaze_data,
+                sampling_density=1.0,
+                num_key_object_samples=0
+            )
+            unique_ids = sampler_results['summary']['unique_objects'] if sampler_results else 1
+            return max(1, question_factor * unique_ids), sampler_results
+        finally:
+            cleanup_temp_files(temp_dir)
     
-    def process_videos(self, sequences: List[Dict[str, str]], questions_per_minute: float, 
+    def process_videos(self, sequences: List[Dict[str, str]], question_factor: int, 
                       output_path: str, dataset_name: str) -> None:
-        """Process multiple videos and generate VQAs"""
-        video_results = []  # List of videos, each with their QA pairs
+        """Process multiple videos and generate VQAs with incremental saving"""
         total_videos = len(sequences)
         total_questions_generated = 0
         
@@ -205,40 +243,167 @@ class VQAGenerationPipeline:
                 log_message(f"No summary found for {sequence_id}")
                 continue
             
-            # Calculate number of questions for this video
-            num_questions = self.calculate_questions_per_video(video_path, questions_per_minute)
-            log_message(f"Generating {num_questions} questions for {sequence_id}")
+            # Load gaze data
+            gaze_data = self.video_loader.load_gaze_data(video_path)
+            # Run sampler once to get unique objects and sample list sized by question_factor
+            log_message("Running ObjectSampler pre-pass to sample key objects for this video")
+            temp_dir_pre = create_temp_dir(self.temp_base_dir, f"{sequence_id}_sampler_{datetime.now().strftime('%H%M%S')}")
+            sampler_results = self.object_sampler.process_video(
+                video_path=video_path,
+                questions_per_minute=1.0,
+                temp_dir=temp_dir_pre,
+                gaze_data=gaze_data,
+                sampling_density=self.sampling_density,
+                num_key_object_samples=None,
+                question_factor=question_factor
+            )
+            key_objects = sampler_results.get('key_objects', []) if sampler_results else []
+            num_questions = len(key_objects)
+            unique_ids = sampler_results['summary']['unique_objects'] if sampler_results else 0
+            log_message(f"Generating {num_questions} questions for {sequence_id} (factor {question_factor} * unique_objects={unique_ids})")
             
-            # Generate multiple VQAs for this video
-            video_qa_pairs = []
+            # Generate multiple VQAs for this video using multiple Gemini threads
+            import threading, queue
+            work_queue = queue.Queue()
+            result_queue = queue.Queue()
+            progress_lock = threading.Lock()
+            
+            # Prepare work items (preselected samples)
             for q in range(num_questions):
-                log_message(f"Generating question {q+1}/{num_questions} for {sequence_id}")
-                
-                result = self.generate_single_vqa(video_path, sequence_id)
-                
-                if result:
-                    video_qa_pairs.append(result)
-                    total_questions_generated += 1
-                    log_message(f"Successfully generated question {q+1} for {sequence_id}")
+                sample = key_objects[q]
+                instance = sample['instance']
+                # Build Gemini-format bbox strictly for batch generation
+                if 'gemini_bbox' in instance and instance['gemini_bbox'] is not None:
+                    gemini_bbox = instance['gemini_bbox']
+                elif 'normalized_bbox' in instance and instance['normalized_bbox'] is not None:
+                    x0, y0, x1, y1 = instance['normalized_bbox']
+                    gemini_bbox = [y0, x0, y1, x1]
                 else:
-                    log_message(f"Failed to generate question {q+1} for {sequence_id}")
-            
-            # Add video with its QA pairs to results if any questions were generated
+                    x0, y0, x1, y1 = instance['bbox']
+                    img_w = instance.get('image_width', 1) or 1
+                    img_h = instance.get('image_height', 1) or 1
+                    gemini_bbox = [
+                        int(y0 / img_h * 1000),
+                        int(x0 / img_w * 1000),
+                        int(y1 / img_h * 1000),
+                        int(x1 / img_w * 1000)
+                    ]
+                preselected = {
+                    'keyframe_path': sample['keyframe']['frame_path'],
+                    'timestamp': sample['keyframe']['timestamp'],
+                    'selected_object': {
+                        'name': instance['object_name'],
+                        'gemini_bbox': gemini_bbox,       # [ymin,xmin,ymax,xmax] 0-1000
+                        'bbox': instance.get('bbox')       # pixel [x0,y0,x1,y1]
+                    }
+                }
+                work_queue.put(preselected)
+
+            # Sentinel for consumers
+            for _ in range(self.qa_n_llms):
+                work_queue.put(None)
+
+            def qa_consumer_thread(thread_id: int):
+                # Each thread should have its own generator/refiner (separate conversations)
+                local_qa = QAGenerator(self.api_key)
+                local_refiner = MCQRefiner(self.api_key)
+                local_results = []
+                while True:
+                    item = work_queue.get()
+                    if item is None:
+                        work_queue.task_done()
+                        break
+                    try:
+                        res = self.generate_single_vqa(
+                            video_path=video_path,
+                            sequence_id=sequence_id,
+                            preselected=item,
+                            gaze_data=gaze_data,
+                            qa_generator=local_qa,
+                            mcq_refiner=local_refiner,
+                            video_summary_preloaded=summary
+                        )
+                        result_queue.put(res)
+                    except Exception:
+                        result_queue.put(None)
+                    finally:
+                        work_queue.task_done()
+
+            # Start consumers
+            consumers = []
+            for i_th in range(self.qa_n_llms):
+                t = threading.Thread(target=qa_consumer_thread, args=(i_th,))
+                t.start()
+                consumers.append(t)
+
+            # Wait for all to complete
+            work_queue.join()
+            for t in consumers:
+                t.join()
+
+            # Collect results (preserve order roughly by taking non-None)
+            video_qa_pairs = []
+            while not result_queue.empty():
+                r = result_queue.get()
+                if r:
+                    video_qa_pairs.append(r)
+                    total_questions_generated += 1
+
+            # Incremental write to JSON per video
             if video_qa_pairs:
-                video_results.append({
-                    'video_name': sequence_id,
-                    'QA': video_qa_pairs
-                })
+                self._append_video_results_incremental(
+                    output_path=output_path,
+                    dataset_name=dataset_name,
+                    video_name=sequence_id,
+                    qa_pairs=video_qa_pairs
+                )
+
+            # Now that all questions for this video are done, clean up the sampler temp keyframes
+            cleanup_temp_files(temp_dir_pre)
         
-        # Create final output in template format
-        final_output = {
-            'generation_date': datetime.now().strftime('%Y-%m-%d,%H:%M:%S'),
-            'dataset': dataset_name,
-            'result': video_results
-        }
-        
-        save_final_result(final_output, output_path)
-        log_message(f"Generated {total_questions_generated} questions for {len(video_results)} videos, saved to {output_path}")
+        # Final log summary from file
+        try:
+            data = self._load_existing_output(output_path)
+            if data:
+                summary = data.get('summary', {})
+                log_message(f"Generated {summary.get('total_questions_generated', 0)} questions for {summary.get('total_videos_processed', 0)} videos, saved to {output_path}")
+        except Exception:
+            pass
+
+    def _load_existing_output(self, output_path: str) -> Optional[Dict[str, Any]]:
+        if not os.path.exists(output_path):
+            return None
+        try:
+            with open(output_path, 'r', encoding='utf-8') as f:
+                return json.load(f)
+        except Exception as e:
+            log_message(f"Failed to load existing output: {e}")
+            return None
+
+    def _append_video_results_incremental(self, output_path: str, dataset_name: str,
+                                          video_name: str, qa_pairs: List[Dict[str, Any]]) -> None:
+        data = self._load_existing_output(output_path)
+        if not data or 'result' not in data:
+            data = {
+                'generation_date': datetime.now().strftime('%Y-%m-%d,%H:%M:%S'),
+                'dataset': dataset_name,
+                'summary': {
+                    'total_videos_processed': 0,
+                    'total_questions_generated': 0
+                },
+                'result': []
+            }
+
+        data['result'].append({'video_name': video_name, 'QA': qa_pairs})
+        data['summary']['total_videos_processed'] = len(data['result'])
+        try:
+            prev = int(data['summary'].get('total_questions_generated', 0))
+        except Exception:
+            prev = 0
+        data['summary']['total_questions_generated'] = prev + len(qa_pairs)
+
+        save_final_result(data, output_path)
+        log_message(f"Appended {len(qa_pairs)} QA(s) for video {video_name} -> {output_path}")
 
 
 def main():
@@ -248,13 +413,19 @@ def main():
     parser.add_argument('--dataset-path', required=True, help='Dataset directory path')
     parser.add_argument('--json-path', required=True, help='Dataset JSON file path')
     parser.add_argument('--dataset-name', required=True, help='Dataset name for output file')
-    parser.add_argument('--limit', type=int, help='Limit number of videos to process')
-    parser.add_argument('--questions-per-minute', type=float, default=1.0,
-                       help='Number of questions to generate per minute of video (default: 1.0)')
+    parser.add_argument('--limit', help='Limit videos: either N (first N) or RANGE like start-end (1-based, inclusive)')
+    parser.add_argument('--question-factor', type=int, default=4,
+                       help='Question factor: generate <factor * unique_object_ids> QA per video (default: 4)')
+    parser.add_argument('--sampling-density', type=float, default=60.0,
+                       help='Sampler density for initial key frame extraction (default: 60, ~one per second)')
     parser.add_argument('--output-path', default=None,
                        help='Output JSON file path (default: <dataset-name>_vqa.json)')
     parser.add_argument('--temp-dir', default='tmp',
                        help='Temporary directory for processing (default: tmp)')
+    parser.add_argument('--n-llms', type=int, default=5,
+                        help='Number of parallel Gemini API threads for object detection (default: 5)')
+    parser.add_argument('--qa-n-llms', type=int, default=30,
+                        help='Number of parallel Gemini API threads for QA generation (default: 30)')
     
     args = parser.parse_args()
     
@@ -266,10 +437,34 @@ def main():
     log_message(f"Loading video sequences from {args.json_path}")
     sequences = load_video_sequences(args.json_path)
     
+    # Apply limit: support N or start-end (1-based, inclusive)
+    total_videos_all = len(sequences)
     if args.limit:
-        sequences = sequences[:args.limit]
+        s = str(args.limit)
+        try:
+            if '-' in s or ':' in s:
+                delim = '-' if '-' in s else ':'
+                parts = [p.strip() for p in s.split(delim) if p.strip()]
+                if len(parts) == 2:
+                    start_idx = max(1, int(parts[0]))
+                    end_idx = min(total_videos_all, int(parts[1]))
+                    if start_idx <= end_idx:
+                        sequences = sequences[start_idx - 1:end_idx]
+                        log_message(f"Limiting videos to range {start_idx}-{end_idx} (of {total_videos_all})")
+                    else:
+                        log_message(f"Invalid limit range: {s}. start > end. No videos will be processed.")
+                        sequences = []
+                else:
+                    log_message(f"Invalid limit format: {s}. Expected 'start-end'. Ignoring limit.")
+            else:
+                n = int(s)
+                if n >= 0:
+                    sequences = sequences[:n]
+                    log_message(f"Limiting to first {n} videos (of {total_videos_all})")
+        except Exception as e:
+            log_message(f"Failed to parse --limit '{s}': {e}. Ignoring limit.")
     
-    log_message(f"Processing {len(sequences)} videos with {args.questions_per_minute} questions per minute")
+    log_message(f"Processing {len(sequences)} videos with question factor {args.question_factor} and sampling density {args.sampling_density}")
     log_message(f"Dataset: {args.dataset_name}")
     log_message(f"Output will be saved to: {args.output_path}")
     
@@ -279,10 +474,15 @@ def main():
         dataset_path=args.dataset_path,
         temp_base_dir=args.temp_dir
     )
+    # Propagate sampling density to pipeline
+    pipeline.sampling_density = args.sampling_density
+    # Propagate n_llms default to object sampler
+    pipeline.object_sampler.n_llms = args.n_llms
+    pipeline.qa_n_llms = args.qa_n_llms
     
     try:
         # Process videos
-        pipeline.process_videos(sequences, args.questions_per_minute, args.output_path, args.dataset_name)
+        pipeline.process_videos(sequences, args.question_factor, args.output_path, args.dataset_name)
         log_message("VQA generation pipeline completed successfully")
         
     except Exception as e:
