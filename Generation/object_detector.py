@@ -59,7 +59,7 @@ Please analyze the image carefully and provide all clearly visible objects with 
 
         try:
             response = self.client.chat.completions.create(
-                model="google/gemini-2.5-pro",
+                model="google/gemini-2.5-flash",
                 messages=[
                     {
                         "role": "user",

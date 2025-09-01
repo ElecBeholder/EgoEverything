@@ -15,9 +15,9 @@ python main.py \
     --dataset-path "$DATASET_PATH" \
     --json-path "$JSON_PATH" \
     --dataset-name "$DATASET_NAME" \
-    --limit 8:10 \
-    --question-factor 4 \
-    --sampling-density 60 \
-    --n-llms 20 \
-    --qa-n-llms 60 \
+    --limit 1:2 \
+    --question-factor 1 \
+    --sampling-density 1 \
+    --n-llms 5 \
+    --qa-n-llms 20 \
     --temp-dir "tmp"

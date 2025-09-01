@@ -29,9 +29,10 @@ class QAGenerator:
         self.frame_extractor = FrameExtractor()
         self.segment_extractor = SegmentFeatureExtractor()
         self.total_tokens = {'prompt_tokens': 0, 'completion_tokens': 0, 'total_tokens': 0}
+        self.cache_stats = {'cache_hits': 0, 'cached_tokens': 0, 'cache_discount': 0.0}
     
-    def setup_tools_and_system_message(self) -> Tuple[List[Dict[str, Any]], str]:
-        """Setup tools and system message for QA generation - keep original unchanged"""
+    def setup_tools_and_system_message(self) -> Tuple[List[Dict[str, Any]], Dict[str, Any]]:
+        """Setup tools and system message for QA generation with caching support"""
         tools = [
             {
                 "type": "function",
@@ -64,8 +65,8 @@ class QAGenerator:
             }
         ]
         
-        # Keep original system message unchanged
-        system_message = """##Overall Task
+        # System message with caching support
+        system_message_text = """##Overall Task
 Imagine you are a user who has been wearing an AR/VR headset for an extended period, during which the device continuously recorded your surroundings. From this full recording, I will select a short clip: video V. Your job is to envision a daily-life scenario S that occurs any amount of time after the events shown in video V have ended.
 
 Within this scenario S, think of a question Q that the user might naturally ask the AR/VR device; the answer to this question must require the device to review video V. The question Q should be rooted in everyday life, described as unambiguously as possible, and fully consistent with scenario S. Then provide the correct answer A to that question. Answer A must be absolutely accurate and unambiguous.
@@ -130,11 +131,23 @@ Evidence:
  • Never invent facts, rely only on the provided descriptions.
  • **CRITICAL** Use the standard OpenAI function-calling format for tool calls; do not invoke tools with plain text."""
         
+        # Return system message as structured content with caching
+        system_message = {
+            "role": "system",
+            "content": [
+                {
+                    "type": "text",
+                    "text": system_message_text,
+                    "cache_control": {"type": "ephemeral"}
+                }
+            ]
+        }
+        
         return tools, system_message
     
     def create_initial_message(self, keyframe_path: str, timestamp: float, 
                              video_summary: str, selected_object: Dict[str, Any]) -> List[Dict[str, Any]]:
-        """Create initial message with keyframe and context"""
+        """Create initial message with keyframe and context, using caching for both video_summary and keyframe"""
         # Format selected object info
         selected_object_info = ""
         if selected_object:
@@ -151,24 +164,30 @@ Object Name: {selected_object.get('name', 'unknown')}
 Object Bounding Box: {gemini_bbox} (format: [ymin, xmin, ymax, xmax], normalized 0-1000 if available)
 """
         
-        user_prompt = f"""Here is the QA key-frame image:
+        # Split content to enable caching for both keyframe and video_summary
+        keyframe_prompt = f"""Here is the QA key-frame image:
 This is a key frame sampled from video at {timestamp:.1f} seconds.
-{selected_object_info}
-Here is the Full segment list description:
-{video_summary}"""
+{selected_object_info}"""
         
         base64_image = encode_image_to_base64(keyframe_path)
+        
+        # Combine all content with single cache control at the end for OpenRouter Gemini
+        combined_text = f"{keyframe_prompt}\n\nHere is the Full segment list description:\n{video_summary}"
         
         return [
             {
                 "role": "user", 
                 "content": [
-                    {"type": "text", "text": user_prompt},
                     {
                         "type": "image_url",
                         "image_url": {
                             "url": base64_image
                         }
+                    },
+                    {
+                        "type": "text", 
+                        "text": combined_text,
+                        "cache_control": {"type": "ephemeral"}
                     }
                 ]
             }
@@ -259,21 +278,36 @@ Here is the Full segment list description:
             return error_msg, ""
     
     def make_api_call(self, messages: List[Dict[str, Any]], tools: List[Dict[str, Any]]) -> Any:
-        """Make API call to LLM"""
+        """Make API call to LLM with caching and usage tracking"""
         response = self.client.chat.completions.create(
-            model="google/gemini-2.5-pro",
+            model="google/gemini-2.5-flash",
             messages=messages,
             tools=tools,
             tool_choice="auto",
             temperature=1,
-            max_tokens=65536
+            max_tokens=65536,
+            extra_body={
+                "usage": {"include": True}  # Enable detailed usage tracking for cache metrics
+            }
         )
         
-        # Track token usage
+        # Track token usage including cached tokens
         token_usage = safe_get_token_usage(response)
         if token_usage:
             for key in self.total_tokens:
-                self.total_tokens[key] += token_usage[key]
+                if key in token_usage:
+                    self.total_tokens[key] += token_usage[key]
+            
+            # Log cache usage details if available
+            cached_tokens = token_usage.get('cached_tokens', 0)
+            if cached_tokens > 0:
+                cache_discount = token_usage.get('cache_discount', 0)
+                self.cache_stats['cache_hits'] += 1
+                self.cache_stats['cached_tokens'] += cached_tokens
+                self.cache_stats['cache_discount'] += cache_discount
+                log_message(f"💾 CACHE HIT: {cached_tokens} tokens saved, discount: ${cache_discount:.4f}")
+            else:
+                log_message(f"⚠️  No cached tokens detected in response")
         
         return response
     
@@ -286,10 +320,8 @@ Here is the Full segment list description:
         # Setup tools and system message
         tools, system_message = self.setup_tools_and_system_message()
         
-        # Create initial messages
-        messages = [
-            {"role": "system", "content": system_message}
-        ]
+        # Create initial messages - system_message is now already structured with cache_control
+        messages = [system_message]
         messages.extend(self.create_initial_message(keyframe_path, timestamp, video_summary, selected_object))
         
         # Initial API call
@@ -356,6 +388,14 @@ Here is the Full segment list description:
         
         log_message("QA generation completed")
         log_message(f"Total tokens used: {self.total_tokens['total_tokens']}")
+        
+        # Log cache statistics
+        if self.cache_stats['cache_hits'] > 0:
+            log_message(f"🎯 CACHE STATS: {self.cache_stats['cache_hits']} hits, "
+                       f"{self.cache_stats['cached_tokens']} tokens cached, "
+                       f"${self.cache_stats['cache_discount']:.4f} total discount")
+        else:
+            log_message("⚠️  NO CACHE HITS - Check if caching is working properly")
         
         return final_result
     

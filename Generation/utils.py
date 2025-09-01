@@ -94,11 +94,37 @@ def safe_get_token_usage(response) -> Optional[Dict[str, int]]:
     """Safely extract token usage from API response"""
     try:
         if hasattr(response, 'usage') and response.usage:
-            return {
+            usage_dict = {
                 'prompt_tokens': getattr(response.usage, 'prompt_tokens', 0),
                 'completion_tokens': getattr(response.usage, 'completion_tokens', 0),
                 'total_tokens': getattr(response.usage, 'total_tokens', 0)
             }
+            
+            # Extract cache-related fields from prompt_tokens_details (OpenRouter/Gemini format)
+            cached_tokens = 0
+            cache_discount = 0.0
+            
+            # Check prompt_tokens_details for cached_tokens
+            if hasattr(response.usage, 'prompt_tokens_details') and response.usage.prompt_tokens_details:
+                cached_tokens = getattr(response.usage.prompt_tokens_details, 'cached_tokens', 0)
+            
+            # Check for top-level cached tokens (alternative format)
+            if cached_tokens == 0:
+                cached_tokens = getattr(response.usage, 'cached_tokens', 0)
+            
+            # Extract cache discount/cost savings
+            if hasattr(response.usage, 'cost_details') and response.usage.cost_details:
+                # Calculate discount from cost structure if available
+                cache_discount = getattr(response.usage, 'cache_discount', 0.0)
+            else:
+                cache_discount = getattr(response.usage, 'cache_discount', 0.0)
+            
+            if cached_tokens > 0:
+                usage_dict['cached_tokens'] = cached_tokens
+            if cache_discount > 0:
+                usage_dict['cache_discount'] = cache_discount
+                
+            return usage_dict
         return None
     except Exception:
         return None

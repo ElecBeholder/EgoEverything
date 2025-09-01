@@ -227,9 +227,9 @@ The pipeline generates a JSON file containing:
 
 ## API Models Used
 
-- **Object Detection**: `google/gemini-2.5-pro`
-- **QA Generation**: `google/gemini-2.5-pro` with tool calling
-- **MCQ Refinement**: `google/gemini-2.5-pro` with structured output
+- **Object Detection**: `google/gemini-2.5-flash`
+- **QA Generation**: `google/gemini-2.5-flash` with tool calling
+- **MCQ Refinement**: `google/gemini-2.5-flash` with structured output
 
 ## Error Handling
 

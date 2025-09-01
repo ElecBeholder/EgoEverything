@@ -148,7 +148,7 @@ Please only return the Question and five options, as well as the correct answer.
             log_message("Starting MCQ refinement with structured output")
             
             response = self.client.chat.completions.create(
-                model="google/gemini-2.5-pro",
+                model="google/gemini-2.5-flash",
                 messages=[
                     {
                         "role": "user",
