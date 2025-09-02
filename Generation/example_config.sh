@@ -10,6 +10,17 @@ export JSON_PATH="/home/wang/AriaEveryday_activaties/AriaEverydayActivities_down
 export DATASET_NAME="AriaEveryday_Activities"
 
 # Run full pipeline
+#python main.py \
+#    --api-key "$API_KEY" \
+#    --dataset-path "$DATASET_PATH" \
+#    --json-path "$JSON_PATH" \
+#    --dataset-name "$DATASET_NAME" \
+#    --limit 1:2 \
+#    --question-factor 4 \
+#    --sampling-density 60 \
+#    --n-llms 20 \
+#    --qa-n-llms 60 \
+#    --temp-dir "tmp"
 python main.py \
     --api-key "$API_KEY" \
     --dataset-path "$DATASET_PATH" \
@@ -19,5 +30,5 @@ python main.py \
     --question-factor 1 \
     --sampling-density 1 \
     --n-llms 5 \
-    --qa-n-llms 20 \
+    --qa-n-llms 1 \
     --temp-dir "tmp"

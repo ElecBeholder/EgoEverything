@@ -38,7 +38,9 @@ class QAGenerator:
                 "type": "function",
                 "function": {
                     "name": "REFINE_SEGMENT",
-                    "description": "Samples multiple frames within a specified timestamp range and returns them in chronological order for visual analysis.",
+                    "description": "Samples multiple frames within a specified timestamp range and returns them in chronological order for visual analysis. \
+                                    Best for understanding: movements, actions, interractions over time. \
+                                    Use when you need to know what happened when",
                     "parameters": {
                         "type": "object",
                         "properties": {
@@ -53,7 +55,9 @@ class QAGenerator:
                 "type": "function",
                 "function": {
                     "name": "REFINE_FRAME",
-                    "description": "Extracts a specific frame at the given timestamp and returns the actual image for visual analysis",
+                    "description": "Extracts a specific frame at the given timestamp and returns the actual image for visual analysis. \
+                                    Best for understanding: what objects are present, their properties, spatial layout. \
+                                    Use when you need to know what objects were there at that moment",
                     "parameters": {
                         "type": "object",
                         "properties": {
@@ -79,18 +83,8 @@ Within this scenario S, think of a question Q that the user might naturally ask 
 
 ## Tools you can call
 You **CANNOT** see raw video, but you can make openai style function calls to gather more information:
-
 **REFINE_SEGMENT(start_second, end_second)**  
- • Extracts multiple frames within a specified timestamp range
- • Returns actual frames in chronological order for visual analysis
- • Best for understanding: movements, actions, interactions over time
- • Use when you need to know "what happened when"
-
 **REFINE_FRAME(timestamp_second)**  
- • Extracts a single frame at the specified timestamp for visual analysis.
- • Returns the actual frame image at that timestamp
- • Best for understanding: what objects are present, their properties, spatial layout
- • Use when you need to know "what objects were there at that moment"
 
 ##Complete overall task in following steps
 1. Analyze full segment list and the QA key-frame image. Identify the selected object information provided in the context.
