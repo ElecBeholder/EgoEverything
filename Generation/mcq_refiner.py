@@ -263,10 +263,50 @@ Please only return the Question and five options, as well as the correct answer.
         question, answer = self.extract_qa_from_response(qa_response)
         
         if question == "Could not extract question":
-            log_message("Skipping MCQ refinement due to extraction failure")
+            log_message("❌Skipping MCQ refinement due to extraction failure")
             return {
                 'success': False,
                 'error': 'Failed to extract QA pair',
+                'original_question': question,
+                'original_answer': answer
+            }
+        
+        # Refine to MCQ
+        refined_response = self.refine_to_mcq(question, answer)
+        
+        if not refined_response:
+            log_message("MCQ refinement failed")
+            return {
+                'success': False,
+                'error': 'MCQ refinement failed',
+                'original_question': question,
+                'original_answer': answer
+            }
+        
+        # Parse MCQ response
+        refined_question, options, correct_index = self.parse_mcq_response(refined_response)
+        
+        # Shuffle options
+        shuffled_options, new_correct_index = self.shuffle_options(options, correct_index)
+        
+        return {
+            'success': True,
+            'original_question': question,
+            'original_answer': answer,
+            'refined_question': refined_question,
+            'options': shuffled_options,
+            'correct_answer_index': new_correct_index,
+            'correct_answer_letter': chr(65 + new_correct_index),
+            'raw_refined_response': refined_response
+        }
+    
+    def process_qa_to_mcq_with_parsed_data(self, question: str, answer: str) -> Dict[str, Any]:
+        """Process already-parsed QA data to MCQ format"""
+        if not question or not answer:
+            log_message("❌Invalid question or answer provided")
+            return {
+                'success': False,
+                'error': 'Invalid question or answer provided',
                 'original_question': question,
                 'original_answer': answer
             }

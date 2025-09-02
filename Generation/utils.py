@@ -10,10 +10,29 @@ from datetime import datetime
 from typing import List, Dict, Any, Optional
 
 
-def log_message(message: str) -> None:
-    """Simple logging with timestamp"""
+# Global log level control - default to simple logging
+_LOG_VERBOSE = False
+
+def set_log_verbose(verbose: bool) -> None:
+    """Set global log verbosity level"""
+    global _LOG_VERBOSE
+    _LOG_VERBOSE = verbose
+
+def log_message(message: str, force: bool = False) -> None:
+    """Simple logging with timestamp, respects verbose setting"""
+    if _LOG_VERBOSE or force:
+        timestamp = datetime.now().strftime('%H:%M:%S')
+        print(f"[{timestamp}] {message}")
+
+def log_simple(message: str) -> None:
+    """Always print simple log message regardless of verbosity"""
     timestamp = datetime.now().strftime('%H:%M:%S')
     print(f"[{timestamp}] {message}")
+
+def is_verbose() -> bool:
+    """Check if verbose logging is enabled"""
+    global _LOG_VERBOSE
+    return _LOG_VERBOSE
 
 
 def encode_image_to_base64(image_path: str) -> str:

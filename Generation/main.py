@@ -5,13 +5,12 @@ Main VQA generation pipeline
 import os
 import argparse
 import random
-import re
 import json
 from datetime import datetime
 from typing import List, Dict, Any, Optional, Tuple
 try:
     from .utils import (
-        log_message, load_video_sequences, save_final_result, 
+        log_message, log_simple, set_log_verbose, load_video_sequences, save_final_result, 
         cleanup_temp_files, create_temp_dir, get_video_duration_minutes
     )
     from .video_loader import VideoLoader
@@ -26,7 +25,7 @@ except ImportError:
     import os
     sys.path.append(os.path.dirname(__file__))
     from utils import (
-        log_message, load_video_sequences, save_final_result, 
+        log_message, log_simple, set_log_verbose, load_video_sequences, save_final_result, 
         cleanup_temp_files, create_temp_dir, get_video_duration_minutes
     )
     from video_loader import VideoLoader
@@ -37,31 +36,6 @@ except ImportError:
     from mcq_refiner import MCQRefiner
     from object_sampler import ObjectSampler
 
-
-def extract_scenario_from_qa_response(qa_response: str) -> str:
-    """Extract scenario from QA generation response"""
-    try:
-        # Look for scenario pattern
-        scenario_pattern = r"[Ss]cenario:\s*\n?(.*?)(?=\n[Qq]uestion:|$)"
-        scenario_match = re.search(scenario_pattern, qa_response, re.DOTALL)
-        
-        if scenario_match:
-            scenario = scenario_match.group(1).strip()
-            return scenario
-        
-        # Alternative pattern
-        lines = qa_response.split('\n')
-        for i, line in enumerate(lines):
-            if line.strip().lower().startswith('scenario:'):
-                scenario = line.split(':', 1)[1].strip()
-                # Check next line for continuation
-                if i + 1 < len(lines) and not lines[i + 1].strip().lower().startswith(('question:', 'answer:', 'evidence:')):
-                    scenario += " " + lines[i + 1].strip()
-                return scenario
-        
-        return "No scenario found"
-    except Exception:
-        return "Failed to extract scenario"
 
 
 class VQAGenerationPipeline:
@@ -102,7 +76,7 @@ class VQAGenerationPipeline:
             # Load video summary
             video_summary = video_summary_preloaded if video_summary_preloaded is not None else self.video_loader.load_video_summary(video_path)
             if not video_summary:
-                log_message(f"No summary found for {sequence_id}, skipping")
+                log_simple(f"No summary found for {sequence_id}, skipping")
                 return None
             
             # Load gaze if not provided
@@ -116,7 +90,7 @@ class VQAGenerationPipeline:
                 selected_object = preselected['selected_object']
                 log_message(f"Using preselected keyframe {timestamp:.1f}s and object {selected_object['name']}")
             else:
-                log_message("Sampling key frame and key object via ObjectSampler")
+                log_simple("Sampling key frame and key object via ObjectSampler")
                 sampler_results = self.object_sampler.process_video(
                     video_path=video_path,
                     questions_per_minute=1.0,
@@ -126,7 +100,7 @@ class VQAGenerationPipeline:
                     num_key_object_samples=1
                 )
                 if not sampler_results or not sampler_results.get('key_objects'):
-                    log_message("ObjectSampler returned no key objects, skipping")
+                    log_simple("ObjectSampler returned no key objects, skipping")
                     return None
                 sampled = sampler_results['key_objects'][0]
                 timestamp = sampled['keyframe']['timestamp']
@@ -153,26 +127,29 @@ class VQAGenerationPipeline:
                     'gemini_bbox': gemini_bbox,            # [ymin,xmin,ymax,xmax] in 0-1000
                     'bbox': instance.get('bbox')            # pixel coords [x0,y0,x1,y1] on keyframe
                 }
-                log_message(f"Sampled keyframe {timestamp:.1f}s and object {selected_object['name']}")
+                log_simple(f"Sampled keyframe {timestamp:.1f}s and object {selected_object['name']}")
             
             # Generate QA
-            log_message("Starting QA generation")
+            log_simple("Starting QA generation")
             local_qa_gen = qa_generator if qa_generator is not None else self.qa_generator
-            qa_response = local_qa_gen.generate_qa(
+            qa_result = local_qa_gen.generate_qa(
                 video_path, keyframe_path, timestamp, video_summary, selected_object, temp_dir
             )
             
-            # Refine to MCQ
-            log_message("Starting MCQ refinement")
-            local_refiner = mcq_refiner if mcq_refiner is not None else self.mcq_refiner
-            mcq_result = local_refiner.process_qa_to_mcq(qa_response)
-            
-            if not mcq_result['success']:
-                log_message(f"MCQ refinement failed: {mcq_result.get('error', 'Unknown error')}")
+            if not qa_result['success']:
+                log_simple("QA generation failed")
                 return None
             
-            # Extract scenario from QA response
-            scenario = extract_scenario_from_qa_response(qa_response)
+            # Refine to MCQ
+            log_simple("Starting MCQ refinement")
+            local_refiner = mcq_refiner if mcq_refiner is not None else self.mcq_refiner
+            mcq_result = local_refiner.process_qa_to_mcq_with_parsed_data(
+                qa_result['question'], qa_result['answer']
+            )
+            
+            if not mcq_result['success']:
+                log_simple(f"MCQ refinement failed: {mcq_result.get('error', 'Unknown error')}")
+                return None
             
             # Create result in template format
             result = {
@@ -182,9 +159,9 @@ class VQAGenerationPipeline:
                     'bbox': selected_object['bbox']  # Use original bbox (not normalized)
                 },
                 'raw_output': {
-                    'raw_qa': f"{mcq_result['original_question']}? {mcq_result['original_answer']}",
-                    'CoT': qa_response,  # Full Gemini output including chain of thought
-                    'scenario': scenario
+                    'raw_qa': f"{qa_result['question']}? {qa_result['answer']}",
+                    'CoT': qa_result['raw_response'],  # Full Gemini output including chain of thought
+                    'scenario': qa_result['scenario']
                 },
                 'token_usage': (qa_generator.total_tokens['total_tokens'] if qa_generator is not None else self.qa_generator.total_tokens['total_tokens']),
                 'question': mcq_result['refined_question'],
@@ -192,11 +169,11 @@ class VQAGenerationPipeline:
                 'correct': mcq_result['correct_answer_index']
             }
             
-            log_message("VQA generation completed successfully")
+            log_simple("VQA generation completed successfully")
             return result
             
         except Exception as e:
-            log_message(f"VQA generation failed: {str(e)}")
+            log_simple(f"VQA generation failed: {str(e)}")
             return None
             
         finally:
@@ -230,23 +207,23 @@ class VQAGenerationPipeline:
             sequence_id = sequence['sequence_id']
             video_path = self.video_loader.get_video_path(sequence_id)
             
-            log_message(f"Processing video {i}/{total_videos}: {sequence_id}")
+            log_simple(f"Processing video {i}/{total_videos}: {sequence_id}")
             
             # Check if video exists
             if not self.video_loader.validate_video_exists(video_path):
-                log_message(f"Video not found: {video_path}")
+                log_simple(f"Video not found: {video_path}")
                 continue
             
             # Check if summary exists
             summary = self.video_loader.load_video_summary(video_path)
             if not summary:
-                log_message(f"No summary found for {sequence_id}")
+                log_simple(f"No summary found for {sequence_id}")
                 continue
             
             # Load gaze data
             gaze_data = self.video_loader.load_gaze_data(video_path)
             # Run sampler once to get unique objects and sample list sized by question_factor
-            log_message("Running ObjectSampler pre-pass to sample key objects for this video")
+            log_simple("Running ObjectSampler pre-pass to sample key objects for this video")
             temp_dir_pre = create_temp_dir(self.temp_base_dir, f"{sequence_id}_sampler_{datetime.now().strftime('%H%M%S')}")
             sampler_results = self.object_sampler.process_video(
                 video_path=video_path,
@@ -260,7 +237,7 @@ class VQAGenerationPipeline:
             key_objects = sampler_results.get('key_objects', []) if sampler_results else []
             num_questions = len(key_objects)
             unique_ids = sampler_results['summary']['unique_objects'] if sampler_results else 0
-            log_message(f"Generating {num_questions} questions for {sequence_id} (factor {question_factor} * unique_objects={unique_ids})")
+            log_simple(f"Generating {num_questions} questions for {sequence_id} (factor {question_factor} * unique_objects={unique_ids})")
             
             # Generate multiple VQAs for this video using multiple Gemini threads
             import threading, queue
@@ -366,7 +343,7 @@ class VQAGenerationPipeline:
             data = self._load_existing_output(output_path)
             if data:
                 summary = data.get('summary', {})
-                log_message(f"Generated {summary.get('total_questions_generated', 0)} questions for {summary.get('total_videos_processed', 0)} videos, saved to {output_path}")
+                log_simple(f"Generated {summary.get('total_questions_generated', 0)} questions for {summary.get('total_videos_processed', 0)} videos, saved to {output_path}")
         except Exception:
             pass
 
@@ -403,7 +380,7 @@ class VQAGenerationPipeline:
         data['summary']['total_questions_generated'] = prev + len(qa_pairs)
 
         save_final_result(data, output_path)
-        log_message(f"Appended {len(qa_pairs)} QA(s) for video {video_name} -> {output_path}")
+        log_simple(f"Completed video {video_name}: {len(qa_pairs)} QA pairs -> {output_path}")
 
 
 def main():
@@ -426,15 +403,20 @@ def main():
                         help='Number of parallel Gemini API threads for object detection (default: 5)')
     parser.add_argument('--qa-n-llms', type=int, default=30,
                         help='Number of parallel Gemini API threads for QA generation (default: 30)')
+    parser.add_argument('--verbose', action='store_true', default=False,
+                        help='Enable detailed logging output (default: simple logging)')
     
     args = parser.parse_args()
+    
+    # Set global log verbosity based on argument
+    set_log_verbose(args.verbose)
     
     # Set default output path if not provided
     if args.output_path is None:
         args.output_path = f"{args.dataset_name}_vqa.json"
     
     # Load video sequences
-    log_message(f"Loading video sequences from {args.json_path}")
+    log_simple(f"Loading video sequences from {args.json_path}")
     sequences = load_video_sequences(args.json_path)
     
     # Apply limit: support N or start-end (1-based, inclusive)
@@ -450,23 +432,23 @@ def main():
                     end_idx = min(total_videos_all, int(parts[1]))
                     if start_idx <= end_idx:
                         sequences = sequences[start_idx - 1:end_idx]
-                        log_message(f"Limiting videos to range {start_idx}-{end_idx} (of {total_videos_all})")
+                        log_simple(f"Limiting videos to range {start_idx}-{end_idx} (of {total_videos_all})")
                     else:
-                        log_message(f"Invalid limit range: {s}. start > end. No videos will be processed.")
+                        log_simple(f"Invalid limit range: {s}. start > end. No videos will be processed.")
                         sequences = []
                 else:
-                    log_message(f"Invalid limit format: {s}. Expected 'start-end'. Ignoring limit.")
+                    log_simple(f"Invalid limit format: {s}. Expected 'start-end'. Ignoring limit.")
             else:
                 n = int(s)
                 if n >= 0:
                     sequences = sequences[:n]
-                    log_message(f"Limiting to first {n} videos (of {total_videos_all})")
+                    log_simple(f"Limiting to first {n} videos (of {total_videos_all})")
         except Exception as e:
-            log_message(f"Failed to parse --limit '{s}': {e}. Ignoring limit.")
+            log_simple(f"Failed to parse --limit '{s}': {e}. Ignoring limit.")
     
-    log_message(f"Processing {len(sequences)} videos with question factor {args.question_factor} and sampling density {args.sampling_density}")
-    log_message(f"Dataset: {args.dataset_name}")
-    log_message(f"Output will be saved to: {args.output_path}")
+    log_simple(f"Processing {len(sequences)} videos with question factor {args.question_factor} and sampling density {args.sampling_density}")
+    log_simple(f"Dataset: {args.dataset_name}")
+    log_simple(f"Output will be saved to: {args.output_path}")
     
     # Create pipeline
     pipeline = VQAGenerationPipeline(
@@ -483,10 +465,10 @@ def main():
     try:
         # Process videos
         pipeline.process_videos(sequences, args.question_factor, args.output_path, args.dataset_name)
-        log_message("VQA generation pipeline completed successfully")
+        log_simple("VQA generation pipeline completed successfully")
         
     except Exception as e:
-        log_message(f"Pipeline failed: {str(e)}")
+        log_simple(f"Pipeline failed: {str(e)}")
         raise
     
     finally:
@@ -503,8 +485,13 @@ def test_single_video():
     parser.add_argument('--sequence-id', required=True, help='Video sequence ID')
     parser.add_argument('--dataset-name', default='test_dataset', help='Dataset name for output')
     parser.add_argument('--temp-dir', default='tmp', help='Temporary directory')
+    parser.add_argument('--verbose', action='store_true', default=False,
+                        help='Enable detailed logging output (default: simple logging)')
     
     args = parser.parse_args()
+    
+    # Set global log verbosity based on argument
+    set_log_verbose(args.verbose)
     
     # Extract dataset path from video path
     dataset_path = os.path.dirname(os.path.dirname(args.video_path))
@@ -517,7 +504,7 @@ def test_single_video():
     )
     
     try:
-        log_message(f"Testing single video: {args.video_path}")
+        log_simple(f"Testing single video: {args.video_path}")
         result = pipeline.generate_single_vqa(args.video_path, args.sequence_id)
         
         if result:
@@ -535,12 +522,12 @@ def test_single_video():
             
             output_path = f"{args.dataset_name}_test_{args.sequence_id}_vqa.json"
             save_final_result(test_output, output_path)
-            log_message(f"Test completed successfully, result saved to {output_path}")
+            log_simple(f"Test completed successfully, result saved to {output_path}")
         else:
-            log_message("Test failed")
+            log_simple("Test failed")
             
     except Exception as e:
-        log_message(f"Test failed: {str(e)}")
+        log_simple(f"Test failed: {str(e)}")
         raise
     
     finally:

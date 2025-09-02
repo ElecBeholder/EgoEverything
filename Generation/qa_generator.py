@@ -2,19 +2,20 @@
 """
 Question-Answer generation using LLM with tool calling
 """
+import pdb
 import json
 import re
 import os
 from typing import List, Dict, Any, Optional, Tuple
 from openai import OpenAI
 try:
-    from .utils import log_message, encode_image_to_base64, safe_get_response_content, safe_get_token_usage
+    from .utils import log_message, log_simple, encode_image_to_base64, safe_get_response_content, safe_get_token_usage, is_verbose
     from .frame_extractor import FrameExtractor, SegmentFeatureExtractor
 except ImportError:
     import sys
     import os
     sys.path.append(os.path.dirname(__file__))
-    from utils import log_message, encode_image_to_base64, safe_get_response_content, safe_get_token_usage
+    from utils import log_message, log_simple, encode_image_to_base64, safe_get_response_content, safe_get_token_usage, is_verbose
     from frame_extractor import FrameExtractor, SegmentFeatureExtractor
 
 
@@ -285,6 +286,23 @@ This is a key frame sampled from video at {timestamp:.1f} seconds.
             }
         )
         
+        # Output Gemini response content to terminal only in verbose mode
+        if is_verbose():
+            response_content = safe_get_response_content(response)
+            if response_content:
+                print("\n" + "="*80)
+                print("🤖 GEMINI RESPONSE:")
+                print("="*80)
+                print(response_content)
+                print("="*80 + "\n")
+            
+            # Check for tool calls and display them
+            if hasattr(response.choices[0].message, 'tool_calls') and response.choices[0].message.tool_calls:
+                print("🔧 TOOL CALLS DETECTED:")
+                for i, tool_call in enumerate(response.choices[0].message.tool_calls, 1):
+                    print(f"  {i}. {tool_call.function.name}({tool_call.function.arguments})")
+                print()
+        
         # Track token usage including cached tokens
         token_usage = safe_get_token_usage(response)
         if token_usage:
@@ -307,7 +325,7 @@ This is a key frame sampled from video at {timestamp:.1f} seconds.
     
     def generate_qa(self, video_path: str, keyframe_path: str, timestamp: float,
                    video_summary: str, selected_object: Dict[str, Any], 
-                   temp_dir: str) -> str:
+                   temp_dir: str) -> Dict[str, Any]:
         """Generate QA pair using LLM with tool calling"""
         log_message("Starting QA generation")
         
@@ -319,6 +337,17 @@ This is a key frame sampled from video at {timestamp:.1f} seconds.
         messages.extend(self.create_initial_message(keyframe_path, timestamp, video_summary, selected_object))
         
         # Initial API call
+        if is_verbose():
+            print("\n" + "🚀 STARTING QA GENERATION" + "\n")
+            print("📝 INITIAL CONTEXT:")
+            print(f"   • Video: {video_path}")
+            print(f"   • Timestamp: {timestamp:.1f}s")
+            print(f"   • Selected Object: {selected_object.get('name', 'unknown')}")
+            print()
+        else:
+            log_message(f"Generating QA for object '{selected_object.get('name', 'unknown')}' at {timestamp:.1f}s")
+        
+        log_simple("Making initial API call")
         response = self.make_api_call(messages, tools)
         
         # Process function calls iteratively
@@ -327,6 +356,10 @@ This is a key frame sampled from video at {timestamp:.1f} seconds.
         
         while iteration_count < max_iterations:
             iteration_count += 1
+            
+            if is_verbose():
+                print(f"\n📍 ITERATION {iteration_count} / {max_iterations}")
+                print("-" * 50)
             
             # Check for tool calls
             has_tool_calls = (hasattr(response.choices[0].message, 'tool_calls') and 
@@ -341,38 +374,62 @@ This is a key frame sampled from video at {timestamp:.1f} seconds.
             
             # If no function calls, break the loop
             if not has_tool_calls and not text_function_calls:
+                if is_verbose():
+                    print("✅ No more tool calls - Generation complete")
                 break
             
             # Process function calls
             if has_tool_calls:
+                if is_verbose():
+                    print(f"🔧 Processing {len(response.choices[0].message.tool_calls)} standard tool calls:")
+                else:
+                    log_message(f"Processing {len(response.choices[0].message.tool_calls)} tool calls")
                 messages.append(response.choices[0].message)
                 
-                for tool_call in response.choices[0].message.tool_calls:
+                for i, tool_call in enumerate(response.choices[0].message.tool_calls, 1):
+                    if is_verbose():
+                        print(f"   {i}. Executing: {tool_call.function.name}")
                     self._process_tool_call(tool_call, messages, video_path, temp_dir)
                     
             else:
                 # Handle text-based function calls
-                messages.append({"role": "assistant", "content": response_content})
-                
-                for i, func_call in enumerate(text_function_calls):
-                    mock_tool_call = type('obj', (object,), {
-                        'id': f"text_call_{iteration_count}_{i}",
-                        'function': type('obj', (object,), {
-                            'name': func_call['name'],
-                            'arguments': json.dumps(func_call['parameters'])
-                        })()
-                    })()
+                if text_function_calls:
+                    if is_verbose():
+                        print(f"🔧 Processing {len(text_function_calls)} text-based function calls:")
+                    else:
+                        log_message(f"Processing {len(text_function_calls)} text-based tool calls")
+                    messages.append({"role": "assistant", "content": response_content})
                     
-                    self._process_tool_call(mock_tool_call, messages, video_path, temp_dir)
+                    for i, func_call in enumerate(text_function_calls):
+                        if is_verbose():
+                            print(f"   {i+1}. Executing: {func_call['name']}")
+                        mock_tool_call = type('obj', (object,), {
+                            'id': f"text_call_{iteration_count}_{i}",
+                            'function': type('obj', (object,), {
+                                'name': func_call['name'],
+                                'arguments': json.dumps(func_call['parameters'])
+                            })()
+                        })()
+                        
+                        self._process_tool_call(mock_tool_call, messages, video_path, temp_dir)
+                elif not text_function_calls:
+                    messages.append({"role": "assistant", "content": response_content})
             
             # Make next API call
+            log_message(f"Making API call - Iteration {iteration_count}")
             response = self.make_api_call(messages, tools)
         
         # Get final result
+        if is_verbose():
+            print("\n🎯 EXTRACTING FINAL RESULT")
+            print("=" * 50)
+        else:
+            log_message("Finalizing QA generation")
+        
         final_result = safe_get_response_content(response)
         
         if not final_result:
-            log_message("No final result, requesting continuation")
+            log_simple("No final result, requesting continuation")
             continue_messages = messages + [{"role": "user", "content": "Continue your analysis."}]
             response = self.make_api_call(continue_messages, tools)
             final_result = safe_get_response_content(response)
@@ -380,7 +437,13 @@ This is a key frame sampled from video at {timestamp:.1f} seconds.
         if not final_result:
             final_result = "QA generation failed to complete"
         
-        log_message("QA generation completed")
+        if final_result and is_verbose():
+            print("📄 FINAL QA RESULT:")
+            print("-" * 50)
+            print(final_result)
+            print("-" * 50)
+        
+        log_simple("QA generation completed")
         log_message(f"Total tokens used: {self.total_tokens['total_tokens']}")
         
         # Log cache statistics
@@ -391,7 +454,34 @@ This is a key frame sampled from video at {timestamp:.1f} seconds.
         else:
             log_message("⚠️  NO CACHE HITS - Check if caching is working properly")
         
-        return final_result
+        # Parse components from response
+        question, answer, evidence, scenario = self.extract_qa_components(final_result)
+        
+        # Check if parsing failed and try structured output fallback
+        if question == "Could not extract question" or question == "Extraction failed":
+            log_simple("QA component extraction failed, attempting structured output fallback")
+            
+            structured_response = self.request_structured_output(final_result)
+            if structured_response:
+                question, answer, evidence, scenario = self.extract_qa_from_structured_response(structured_response)
+                
+                if question != "Structured parsing failed":
+                    log_simple("Successfully recovered QA components using structured output")
+                else:
+                    log_simple("Structured output fallback also failed")
+            else:
+                log_simple("Structured output request failed")
+        else:
+            log_simple("QA components extracted successfully")
+        
+        return {
+            'raw_response': final_result,
+            'question': question,
+            'answer': answer, 
+            'evidence': evidence,
+            'scenario': scenario,
+            'success': question != "Could not extract question" and question != "Extraction failed" and question != "Structured parsing failed"
+        }
     
     def _parse_text_function_calls(self, response_content: str) -> List[Dict[str, Any]]:
         """Parse function calls from text response"""
@@ -425,13 +515,221 @@ This is a key frame sampled from video at {timestamp:.1f} seconds.
         
         return function_calls
     
+    def get_structured_qa_schema(self) -> Dict[str, Any]:
+        """Get JSON schema for structured QA output"""
+        return {
+            "name": "structured_qa_output",
+            "strict": True,
+            "schema": {
+                "type": "object",
+                "properties": {
+                    "scenario": {
+                        "type": "string",
+                        "description": "One-sentence description of the daily-life scenario when the user would ask the question"
+                    },
+                    "question": {
+                        "type": "string",
+                        "description": "What the user says to the AR/VR assistant - the question they would naturally ask"
+                    },
+                    "answer": {
+                        "type": "string",
+                        "description": "Absolutely accurate and unambiguous answer to the question"
+                    },
+                    "evidence": {
+                        "type": "string",
+                        "description": "Quote from frame or segment analysis used for cross-verification and QA evidence"
+                    }
+                },
+                "required": ["scenario", "question", "answer", "evidence"],
+                "additionalProperties": False
+            }
+        }
+    
+    def request_structured_output(self, original_response: str) -> Optional[str]:
+        """Request structured output when parsing fails"""
+        try:
+            log_message("Requesting structured output due to parsing failure")
+            
+            structured_prompt = f"""The previous response could not be parsed properly. Please reformat your answer using the exact structured format below:
+
+Original response:
+{original_response}
+
+Please provide a structured JSON output with the following format:
+- scenario: One-sentence description of the daily-life scenario when the user would ask
+- question: What the user says to the AR/VR assistant
+- answer: Absolutely accurate and unambiguous answer to the question  
+- evidence: Quote from frame or segment analysis for cross-verification
+
+Ensure the JSON is valid and follows the required structure."""
+            
+            json_schema = self.get_structured_qa_schema()
+            
+            response = self.client.chat.completions.create(
+                model="google/gemini-2.5-flash",
+                messages=[
+                    {
+                        "role": "user",
+                        "content": structured_prompt
+                    }
+                ],
+                response_format={
+                    "type": "json_schema",
+                    "json_schema": json_schema
+                },
+                temperature=0.1,
+                max_tokens=65536
+            )
+            
+            structured_response = safe_get_response_content(response)
+            if structured_response:
+                log_message("✅ Successfully obtained structured QA output")
+                return structured_response
+            else:
+                log_message("❌ Failed to get structured output")
+                return None
+                
+        except Exception as e:
+            log_message(f"Structured output request failed: {str(e)}")
+            return None
+    
+    def extract_qa_components(self, qa_response: str) -> Tuple[str, str, str, str]:
+        """Extract question, answer, evidence, and scenario from QA response"""
+        try:
+            # Extract scenario
+            scenario_pattern = r"[Ss]cenario:\s*\n?(.*?)(?=\n[Qq]uestion:|$)"
+            scenario_match = re.search(scenario_pattern, qa_response, re.DOTALL)
+            
+            if scenario_match:
+                scenario = scenario_match.group(1).strip()
+            else:
+                # Alternative pattern
+                lines = qa_response.split('\n')
+                scenario = "No scenario found"
+                for i, line in enumerate(lines):
+                    if line.strip().lower().startswith('scenario:'):
+                        scenario = line.split(':', 1)[1].strip()
+                        if i + 1 < len(lines) and not lines[i + 1].strip().lower().startswith(('question:', 'answer:', 'evidence:')):
+                            scenario += " " + lines[i + 1].strip()
+                        break
+            
+            # Extract question and answer
+            question_pattern = r"[Qq]uestion:\s*\n?(.*?)(?=\n[Aa]nswer:|$)"
+            answer_pattern = r"[Aa]nswer:\s*\n?(.*?)(?=\n[Ee]vidence:|$)"
+            evidence_pattern = r"[Ee]vidence:\s*\n?(.*?)(?=\n|$)"
+            
+            question_match = re.search(question_pattern, qa_response, re.DOTALL)
+            answer_match = re.search(answer_pattern, qa_response, re.DOTALL)
+            evidence_match = re.search(evidence_pattern, qa_response, re.DOTALL)
+            
+            if question_match and answer_match:
+                question = question_match.group(1).strip()
+                answer = answer_match.group(1).strip()
+                evidence = evidence_match.group(1).strip() if evidence_match else "No evidence found"
+                
+                log_message("✅ Successfully extracted QA components from response")
+                return question, answer, evidence, scenario
+            
+            # Try alternative patterns
+            lines = qa_response.split('\n')
+            question = None
+            answer = None
+            evidence = None
+            
+            for i, line in enumerate(lines):
+                if line.strip().lower().startswith('question:'):
+                    question = line.split(':', 1)[1].strip()
+                    if i + 1 < len(lines):
+                        question += " " + lines[i + 1].strip()
+                elif line.strip().lower().startswith('answer:'):
+                    answer = line.split(':', 1)[1].strip()
+                    if i + 1 < len(lines):
+                        answer += " " + lines[i + 1].strip()
+                elif line.strip().lower().startswith('evidence:'):
+                    evidence = line.split(':', 1)[1].strip()
+                    if i + 1 < len(lines):
+                        evidence += " " + lines[i + 1].strip()
+            
+            if question and answer:
+                log_message("✅ Extracted QA components using alternative method")
+                return question, answer, evidence or "No evidence found", scenario
+            
+            log_message("❌ Failed to extract QA components")
+            return "Could not extract question", "Could not extract answer", "No evidence found", scenario
+            
+        except Exception as e:
+            log_message(f"Error extracting QA components: {str(e)}")
+            return "Extraction failed", "Extraction failed", "Extraction failed", "Extraction failed"
+    
+    def extract_qa_from_structured_response(self, structured_response: str) -> Tuple[str, str, str, str]:
+        """Extract question, answer, evidence, scenario from structured JSON response"""
+        try:
+            log_message("Parsing structured JSON QA response")
+            
+            # Clean response text and extract JSON
+            cleaned_response = structured_response.strip()
+            
+            # Remove code block markers if present
+            if cleaned_response.startswith('```'):
+                json_match = re.search(r'```(?:json)?\s*\n?(.*?)\n?```', cleaned_response, re.DOTALL)
+                if json_match:
+                    cleaned_response = json_match.group(1).strip()
+            
+            # Extract JSON object
+            brace_start = cleaned_response.find('{')
+            if brace_start != -1:
+                brace_count = 0
+                brace_end = brace_start
+                for i, char in enumerate(cleaned_response[brace_start:], brace_start):
+                    if char == '{':
+                        brace_count += 1
+                    elif char == '}':
+                        brace_count -= 1
+                        if brace_count == 0:
+                            brace_end = i
+                            break
+                cleaned_response = cleaned_response[brace_start:brace_end + 1]
+            
+            # Parse JSON
+            parsed_data = json.loads(cleaned_response)
+            
+            # Extract fields
+            question = parsed_data.get('question', 'Failed to parse question').strip()
+            answer = parsed_data.get('answer', 'Failed to parse answer').strip()
+            evidence = parsed_data.get('evidence', 'Failed to parse evidence').strip()
+            scenario = parsed_data.get('scenario', 'Failed to parse scenario').strip()
+            
+            log_message("✅ Successfully extracted components from structured response")
+            return question, answer, evidence, scenario
+            
+        except Exception as e:
+            log_message(f"Structured parsing failed: {str(e)}")
+            return "Structured parsing failed", "Structured parsing failed", "Structured parsing failed", "Structured parsing failed"
+    
     def _process_tool_call(self, tool_call: Any, messages: List[Dict[str, Any]], 
                           video_path: str, temp_dir: str) -> None:
         """Process individual tool call"""
         if tool_call.function.name == "REFINE_SEGMENT":
+            if is_verbose():
+                print(f"     🎞️  REFINE_SEGMENT: {tool_call.function.arguments}")
+            else:
+                # Parse arguments for simple logging
+                try:
+                    args = json.loads(tool_call.function.arguments)
+                    start_s = args.get("start_second", "?")
+                    end_s = args.get("end_second", "?")
+                    log_message(f"Refining video segment {start_s}s-{end_s}s")
+                except:
+                    log_message("Refining video segment")
+            
             response_text, frame_paths = self.handle_refine_segment(
                 {'arguments': tool_call.function.arguments}, video_path, temp_dir
             )
+            
+            if is_verbose():
+                print(f"     ✅ Extracted {len(frame_paths)} representative frames")
+            else:
+                log_message(f"Extracted {len(frame_paths)} representative frames")
             
             # Add tool response
             messages.append({
@@ -452,9 +750,31 @@ This is a key frame sampled from video at {timestamp:.1f} seconds.
                 messages.append({"role": "user", "content": content})
                 
         elif tool_call.function.name == "REFINE_FRAME":
+            if is_verbose():
+                print(f"     🖼️  REFINE_FRAME: {tool_call.function.arguments}")
+            else:
+                # Parse arguments for simple logging
+                try:
+                    args = json.loads(tool_call.function.arguments)
+                    timestamp = args.get("timestamp_second", "?")
+                    log_message(f"Extracting frame at {timestamp}s")
+                except:
+                    log_message("Extracting frame")
+            
             response_text, frame_path = self.handle_refine_frame(
                 {'arguments': tool_call.function.arguments}, video_path, temp_dir
             )
+            
+            if is_verbose():
+                if frame_path and os.path.exists(frame_path):
+                    print(f"     ✅ Extracted frame: {os.path.basename(frame_path)}")
+                else:
+                    print(f"     ❌ Failed to extract frame")
+            else:
+                if frame_path and os.path.exists(frame_path):
+                    log_message(f"Frame extracted successfully")
+                else:
+                    log_message(f"Frame extraction failed")
             
             # Add tool response
             messages.append({
@@ -512,7 +832,12 @@ def main():
         )
         
         log_message("QA Generation Result:")
-        print(result)
+        print(f"Success: {result['success']}")
+        print(f"Question: {result['question']}")
+        print(f"Answer: {result['answer']}")
+        print(f"Evidence: {result['evidence']}")
+        print(f"Scenario: {result['scenario']}")
+        print(f"Raw Response: {result['raw_response']}")
         
     except Exception as e:
         log_message(f"QA generation test failed: {str(e)}")
