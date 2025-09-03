@@ -616,7 +616,7 @@ Ensure the JSON is valid and follows the required structure."""
             # Extract question and answer
             question_pattern = r"[Qq]uestion:\s*\n?(.*?)(?=\n[Aa]nswer:|$)"
             answer_pattern = r"[Aa]nswer:\s*\n?(.*?)(?=\n[Ee]vidence:|$)"
-            evidence_pattern = r"[Ee]vidence:\s*\n?(.*?)(?=\n|$)"
+            evidence_pattern = r"[Ee]vidence:\s*\n?(.*?)(?=\n[A-Z][a-z]*:|$)"
             
             question_match = re.search(question_pattern, qa_response, re.DOTALL)
             answer_match = re.search(answer_pattern, qa_response, re.DOTALL)
@@ -639,16 +639,28 @@ Ensure the JSON is valid and follows the required structure."""
             for i, line in enumerate(lines):
                 if line.strip().lower().startswith('question:'):
                     question = line.split(':', 1)[1].strip()
-                    if i + 1 < len(lines):
-                        question += " " + lines[i + 1].strip()
+                    # Continue reading until next section or end
+                    j = i + 1
+                    while j < len(lines) and not lines[j].strip().lower().startswith(('answer:', 'evidence:')):
+                        if lines[j].strip():
+                            question += " " + lines[j].strip()
+                        j += 1
                 elif line.strip().lower().startswith('answer:'):
                     answer = line.split(':', 1)[1].strip()
-                    if i + 1 < len(lines):
-                        answer += " " + lines[i + 1].strip()
+                    # Continue reading until next section or end
+                    j = i + 1
+                    while j < len(lines) and not lines[j].strip().lower().startswith(('question:', 'evidence:')):
+                        if lines[j].strip():
+                            answer += " " + lines[j].strip()
+                        j += 1
                 elif line.strip().lower().startswith('evidence:'):
                     evidence = line.split(':', 1)[1].strip()
-                    if i + 1 < len(lines):
-                        evidence += " " + lines[i + 1].strip()
+                    # Continue reading until next section or end
+                    j = i + 1
+                    while j < len(lines) and not lines[j].strip().lower().startswith(('question:', 'answer:')):
+                        if lines[j].strip():
+                            evidence += " " + lines[j].strip()
+                        j += 1
             
             if question and answer:
                 log_message("✅ Extracted QA components using alternative method")

@@ -18,7 +18,8 @@ try:
     from .object_detector import ObjectDetector
     from .gaze_processor import ObjectSelector
     from .qa_generator import QAGenerator
-    from .mcq_refiner import MCQRefiner
+    from .qa_reviewer import QAReviewerRefiner
+    from .evidence_extractor import EvidenceTimestampExtractor
     from .object_sampler import ObjectSampler
 except ImportError:
     import sys
@@ -33,7 +34,8 @@ except ImportError:
     from object_detector import ObjectDetector
     from gaze_processor import ObjectSelector
     from qa_generator import QAGenerator
-    from mcq_refiner import MCQRefiner
+    from qa_reviewer import QAReviewerRefiner
+    from evidence_extractor import EvidenceTimestampExtractor
     from object_sampler import ObjectSampler
 
 
@@ -52,7 +54,8 @@ class VQAGenerationPipeline:
         self.object_detector = ObjectDetector(api_key)
         self.object_selector = ObjectSelector()
         self.qa_generator = QAGenerator(api_key)
-        self.mcq_refiner = MCQRefiner(api_key)
+        self.qa_reviewer = QAReviewerRefiner(api_key)
+        self.evidence_extractor = EvidenceTimestampExtractor(api_key)
         self.object_sampler = ObjectSampler(api_key)
         self.sampling_density = 60.0
         self.qa_n_llms = 30
@@ -64,7 +67,7 @@ class VQAGenerationPipeline:
                             preselected: Optional[Dict[str, Any]] = None,
                             gaze_data: Optional[Any] = None,
                             qa_generator: Optional[QAGenerator] = None,
-                            mcq_refiner: Optional[MCQRefiner] = None,
+                            qa_reviewer: Optional[QAReviewerRefiner] = None,
                             video_summary_preloaded: Optional[str] = None) -> Optional[Dict[str, Any]]:
         """Generate a single VQA for a video"""
         # Create a per-question unique temp directory to avoid collisions across threads
@@ -140,18 +143,42 @@ class VQAGenerationPipeline:
                 log_simple("QA generation failed")
                 return None
             
-            # Refine to MCQ
-            log_simple("Starting MCQ refinement")
-            local_refiner = mcq_refiner if mcq_refiner is not None else self.mcq_refiner
-            mcq_result = local_refiner.process_qa_to_mcq_with_parsed_data(
-                qa_result['question'], qa_result['answer']
+            # Extract evidence timestamps
+            log_simple("Extracting evidence timestamps")
+            evidence_timestamps = self.evidence_extractor.extract_timestamps(qa_result['evidence'])
+            
+            # Review and refine QA to MCQ
+            log_simple("Starting QA review and MCQ refinement")
+            local_reviewer = qa_reviewer if qa_reviewer is not None else self.qa_reviewer
+            review_result = local_reviewer.review_and_refine(
+                qa_result['question'], qa_result['answer'], evidence_timestamps,
+                video_path, video_summary, temp_dir
             )
             
-            if not mcq_result['success']:
-                log_simple(f"MCQ refinement failed: {mcq_result.get('error', 'Unknown error')}")
+            # Log detailed review and refinement results
+            if review_result['success']:
+                parsed_result = review_result['parsed_result']
+                log_simple(f"QA Review and refinement completed")
+                log_message("=== REVIEW & REFINEMENT RESULTS ===")
+                log_message(f"Review Checklist:")
+                for check_name, check_result in parsed_result['review_checklist'].items():
+                    log_message(f"  - {check_name}: {check_result}")
+                log_message(f"Refinement Rationale: {parsed_result['refinement_rationale']}")
+                log_message(f"Refined Question: {parsed_result['refined_question']}")
+                log_message(f"Options: {parsed_result['refined_options']}")
+                log_message(f"Correct Answer: {parsed_result['correct_answer']}")
+                log_message(f"Distinction Notes: {parsed_result['distinction_notes']}")
+                log_message("=== END REVIEW & REFINEMENT ===")
+            else:
+                log_simple("QA review and refinement failed")
                 return None
             
-            # Create result in template format
+            # Create result with refined MCQ from review
+            # Convert correct answer letter to index
+            correct_index = None
+            if parsed_result['correct_answer'] in 'ABCDE':
+                correct_index = ord(parsed_result['correct_answer']) - ord('A')
+            
             result = {
                 'key_frame_timestamp': timestamp,
                 'key_object': {
@@ -161,12 +188,20 @@ class VQAGenerationPipeline:
                 'raw_output': {
                     'raw_qa': f"{qa_result['question']}? {qa_result['answer']}",
                     'CoT': qa_result['raw_response'],  # Full Gemini output including chain of thought
-                    'scenario': qa_result['scenario']
+                    'scenario': qa_result['scenario'],
+                    'original_question': qa_result['question'],
+                    'original_answer': qa_result['answer']
                 },
                 'token_usage': (qa_generator.total_tokens['total_tokens'] if qa_generator is not None else self.qa_generator.total_tokens['total_tokens']),
-                'question': mcq_result['refined_question'],
-                'answer': mcq_result['options'],
-                'correct': mcq_result['correct_answer_index']
+                'review_result': {
+                    'review_checklist': parsed_result['review_checklist'],
+                    'refinement_rationale': parsed_result['refinement_rationale'],
+                    'distinction_notes': parsed_result['distinction_notes']
+                },
+                # Refined MCQ fields
+                'question': parsed_result['refined_question'] if parsed_result['refined_question'] else qa_result['question'],
+                'answer': parsed_result['refined_options'] if parsed_result['refined_options'] else [qa_result['answer'], "Option B", "Option C", "Option D", "Option E"],
+                'correct': correct_index if correct_index is not None else 0
             }
             
             log_simple("VQA generation completed successfully")
@@ -281,9 +316,9 @@ class VQAGenerationPipeline:
                 work_queue.put(None)
 
             def qa_consumer_thread(thread_id: int):
-                # Each thread should have its own generator/refiner (separate conversations)
+                # Each thread should have its own generator/reviewer (separate conversations)
                 local_qa = QAGenerator(self.api_key)
-                local_refiner = MCQRefiner(self.api_key)
+                local_reviewer = QAReviewerRefiner(self.api_key)
                 local_results = []
                 while True:
                     item = work_queue.get()
@@ -297,7 +332,7 @@ class VQAGenerationPipeline:
                             preselected=item,
                             gaze_data=gaze_data,
                             qa_generator=local_qa,
-                            mcq_refiner=local_refiner,
+                            qa_reviewer=local_reviewer,
                             video_summary_preloaded=summary
                         )
                         result_queue.put(res)

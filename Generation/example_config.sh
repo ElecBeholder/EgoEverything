@@ -29,9 +29,10 @@ python main.py \
     --dataset-path "$DATASET_PATH" \
     --json-path "$JSON_PATH" \
     --dataset-name "$DATASET_NAME" \
-    --limit 1:2 \
+    --limit 2:3 \
     --question-factor 1 \
     --sampling-density 1 \
     --n-llms 5 \
     --qa-n-llms 1 \
-    --temp-dir "tmp"
+    --temp-dir "tmp" \
+    --verbose
