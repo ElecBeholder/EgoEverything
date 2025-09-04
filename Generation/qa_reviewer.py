@@ -39,7 +39,9 @@ class QAReviewerRefiner:
                 "type": "function",
                 "function": {
                     "name": "VERIFY_SEGMENT",
-                    "description": "Samples frames within a timestamp range for visual verification",
+                    "description": "Samples multiple frames within a specified timestamp range and returns them in chronological order for visual analysis. \
+                                    Best for understanding: movements, actions, interractions over time. \
+                                    Use when you need to know what happened when",
                     "parameters": {
                         "type": "object",
                         "properties": {
@@ -54,7 +56,9 @@ class QAReviewerRefiner:
                 "type": "function",
                 "function": {
                     "name": "VERIFY_FRAME",
-                    "description": "Extracts a specific frame at given timestamp for detailed verification",
+                    "description": "Extracts a specific frame at the given timestamp and returns the actual image for visual analysis. \
+                                    Best for understanding: what objects are present, their properties, spatial layout. \
+                                    Use when you need to know what objects were there at that moment",
                     "parameters": {
                         "type": "object",
                         "properties": {
@@ -68,44 +72,46 @@ class QAReviewerRefiner:
         
         # System message with review checklist and refinement instructions
         system_message_text = """## Task Overview
-You are a VQA Quality Expert who reviews, refines, and converts QA pairs into multiple choice questions.
+You are a VQA Quality Expert who reviews, rewrite, and converts QA pairs into multiple choice questions.
 
 ## Context You Will Receive
 1. **Question**: The generated question
 2. **Answer**: The generated answer
-3. **Evidence Timestamps**: List of timestamps where evidence was found (frames and segments)
+3. **Evidence Image**: List of Image evidence
 4. **Video Summary**: Action descriptions with timestamps
-5. **Video Access**: Through VERIFY_FRAME and VERIFY_SEGMENT tools
 
-## Review Checklist
-
+## Checklist
 ### 1. Fact Verification
-- Verify the consistency between evidence and the generated answer
-- Ensure all facts in the answer are visually verifiable
+1 Ensure all key object in evidence images are clearly depict: NO distortion, No partial view, No category ambiguity, No poor lighting.
+2 You **MUST** use tools to find another evidence to complete Fact Verification.
 
 ### 2. Ambiguity Review
-- **Spatial descriptions**: Ensure location descriptions are viewpoint-independent (avoid "left/right")
-- **Object uniqueness**: Verify that object descriptions are unambiguous - check the video to make sure no other objects match the same description
-- Check for any potential confusion in object identification
+1. **Spatial descriptions**: Ensure location descriptions are viewpoint-independent (avoid "left/right")
+2. **Object uniqueness**: Verify that object descriptions are unambiguous. You **MUST** check potential segments using tools to make sure no other objects match the same description
 
 ### 3. Logic Chain Review
 - Determine if the answer is the ONLY logical conclusion from the evidence
-- Consider alternative conclusions that could also be supported by the same evidence
-- Imagine a contradictory conclusion that still fits the evidence - if possible, the logic is weak
+- You should imagine a contradictory conclusion that still fits the evidence - if this conclusion is reasonable, the logic is weak
 
-### 4. Wording Review
-- **No external time references**: Remove any references to time outside the video
-- **No timestamps**: Replace video timestamps with action sequences or behavioral markers
-- **Natural phrasing**: Ensure questions sound like natural everyday queries about personal activities
-- **Detail-focused**: Questions should ask about specific details, not general information
-- **No video awareness**: Remove any words like "in the video", "footage", "recording" - questions should be as if asking about real memory
+### 4. Question Quality
+- **Detail-focused**: Questions should ask about specific details, NOT general informaation (like location, appearance)
 
-## Refinement and MCQ Conversion Process
+### 5. Wording Review
+- **Natural phrasing**: questions sound like natural everyday question
+- **No timestamps**: Replace **ANY** timestamps with action sequences or behavioral markers
+- **No video awareness**: Remove any words like "in the video", "footage", "recording" - questions should be as if asking someone to help recall "my" memory
 
-### Step 1: Refine the QA
-Based on your review, refine the question and answer to fix all issues identified in the checklist
-
-### Step 2: Generate MCQ Options
+## Instructions
+Step 1 Carefully review the QA and evidence Images
+Step 2 Use tools to gather additional information needed for Fact verification
+ • After each function response, briefly reflect on what you learned before deciding whether another call is necessary
+ • Feel free to chain tool calls: study responses, think, then request another refinement until you find NEW evidence
+Step 3: Use tools to gather segment frames that may contain objects that match the same description
+ • After each function response, briefly reflect on what you learned before deciding whether another call is necessary
+ • Feel free to chain tool calls: study responses, think, then request another refinement until you all potential segments are checked
+Step 4: Based on the information you just collected, finish the checklist
+Step 5: Based on the knowledge you have, generate a BETTER question and answer that don't all issues identified in the checklist
+Step 6: Generate MCQ Options
 Create 4 incorrect options that are:
 - May share some elements with the correct answer
 - Have visually clear distinguishing details that make them wrong
@@ -115,16 +121,17 @@ Create 4 incorrect options that are:
 After completing your review and refinement, provide output in this EXACT format:
 
 REVIEW_CHECKLIST:
-1. Fact Verification: [PASS/FAIL with specific issues]
+1. Fact Verification: [PASS/Uncertain/FAIL with specific issues]
 2. Ambiguity Review: [PASS/FAIL with specific issues]
-3. Logic Chain: [PASS/FAIL with specific issues]  
-4. Wording: [PASS/FAIL with specific issues]
+3. Logic Chain: [PASS/FAIL with An imagined contradictory conclusion, and whether it's reasonable]
+4. Question Quality: [PASS/FAIL with specific issues]
+5. Wording: [PASS/FAIL with specific issues]
 
 REFINEMENT_RATIONALE:
-[Explain what changes you made and why]
+[Explain what changes you made to solve issues. List in order of checklist]
 
 REFINED_QUESTION:
-[The improved question]
+[New question]
 
 REFINED_OPTIONS:
 A. [Option A]
@@ -139,10 +146,14 @@ DISTINCTION_NOTES:
 [Brief explanation of what makes wrong answers incorrect]
 
 ## Critical Requirements
-- ALWAYS use tools to verify evidence timestamps
+- **YOU MUST** strictly follow the Guideline
+- **YOU MUST** reflect on what you learned for each tools calling
+- **YOU MUST** use tools to get NEW EVIDENCE for Item identity and Ambiguity review
+- Only one tool calling is sent each time
+- **Be critical** and try to find errors that do not meet the checklist
 - Be specific about visual details observed
 - Ensure MCQ options are challenging but fair
-- Focus on creating natural, memory-like questions"""
+- Focus on creating natural, recall memory-like questions"""
         
         # Return system message with caching
         system_message = {
@@ -159,20 +170,17 @@ DISTINCTION_NOTES:
         return tools, system_message
     
     def create_review_message(self, question: str, answer: str, 
-                             evidence_timestamps: Dict[str, Any],
+                             evidence_images: List[Dict[str, Any]],
                              video_summary: str) -> List[Dict[str, Any]]:
-        """Create message for review and refinement"""
+        """Create message for review and refinement with evidence images"""
         
-        # Format timestamps for clarity
-        timestamp_text = "Evidence Timestamps:\n"
-        if evidence_timestamps.get("frames"):
-            timestamp_text += "Single frames: " + ", ".join(
-                [f"{f}s" for f in evidence_timestamps["frames"]]
-            ) + "\n"
-        if evidence_timestamps.get("segments"):
-            timestamp_text += "Segments: " + ", ".join(
-                [f"{s['start']}s-{s['end']}s" for s in evidence_timestamps["segments"]]
-            )
+        # Format evidence description
+        evidence_text = "Evidence Images Provided:\n"
+        for i, img in enumerate(evidence_images, 1):
+            if img['type'] == 'frame':
+                evidence_text += f"{i}. Frame at {img['timestamp']}s\n"
+            else:  # segment
+                evidence_text += f"{i}. Frame from segment {img['segment_range']} (at {img['timestamp']}s)\n"
         
         combined_text = f"""Please review and refine this QA pair:
 
@@ -180,28 +188,37 @@ DISTINCTION_NOTES:
 
 **ANSWER**: {answer}
 
-**EVIDENCE TIMESTAMPS**:
-{timestamp_text}
+**EVIDENCE PROVIDED**:
+{evidence_text}
 
 **VIDEO SUMMARY**:
 {video_summary}
-
-Instructions:
-1. Use the tools to verify the evidence at the provided timestamps
-2. Complete the review checklist 
-3. Refine the QA based on issues found
-4. Convert to MCQ with 5 challenging options"""
+"""
+        
+        # Build content with text and images
+        content = [
+            {
+                "type": "text", 
+                "text": combined_text,
+                "cache_control": {"type": "ephemeral"}
+            }
+        ]
+        
+        # Add evidence images
+        for i, img_info in enumerate(evidence_images, 1):
+            content.append({
+                "type": "text",
+                "text": f"Evidence Image {i}:"
+            })
+            content.append({
+                "type": "image_url",
+                "image_url": {"url": encode_image_to_base64(img_info['path'])}
+            })
         
         return [
             {
                 "role": "user", 
-                "content": [
-                    {
-                        "type": "text", 
-                        "text": combined_text,
-                        "cache_control": {"type": "ephemeral"}
-                    }
-                ]
+                "content": content
             }
         ]
     
@@ -295,7 +312,7 @@ Instructions:
             messages=messages,
             tools=tools,
             tool_choice="auto",
-            temperature=0.3,
+            temperature=1,
             max_tokens=65536,
             extra_body={
                 "usage": {"include": True}
@@ -336,11 +353,11 @@ Instructions:
         return response
     
     def review_and_refine(self, question: str, answer: str, 
-                         evidence_timestamps: Dict[str, Any],
+                         evidence_images: List[Dict[str, Any]],
                          video_path: str, video_summary: str, 
                          temp_dir: str) -> Dict[str, Any]:
-        """Review QA and refine to MCQ"""
-        log_message("Starting QA review and MCQ refinement")
+        """Review QA and refine to MCQ with evidence images"""
+        log_message("Starting QA review and MCQ refinement with evidence images")
         
         # Setup tools and system message
         tools, system_message = self.setup_tools_and_system_message()
@@ -348,7 +365,7 @@ Instructions:
         # Create messages
         messages = [system_message]
         messages.extend(self.create_review_message(
-            question, answer, evidence_timestamps, video_summary
+            question, answer, evidence_images, video_summary
         ))
         
         if is_verbose():
@@ -356,7 +373,7 @@ Instructions:
             print("📝 CONTEXT:")
             print(f"   • Question: {question}")
             print(f"   • Answer: {answer}")
-            print(f"   • Evidence timestamps: {evidence_timestamps}")
+            print(f"   • Evidence images: {len(evidence_images)} images provided")
             print()
         else:
             log_message(f"Reviewing QA: '{question}' -> '{answer}'")
@@ -381,24 +398,54 @@ Instructions:
             
             response_content = safe_get_response_content(response)
             
+            # Parse text-based function calls if no tool calls
+            text_function_calls = []
+            if not has_tool_calls and response_content:
+                text_function_calls = self._parse_text_function_calls(response_content)
+            
             # If no function calls, break
-            if not has_tool_calls:
+            if not has_tool_calls and not text_function_calls:
                 if is_verbose():
                     print("✅ No more tool calls - Review complete")
                 break
             
-            # Process tool calls
-            if is_verbose():
-                print(f"🔧 Processing {len(response.choices[0].message.tool_calls)} tool calls:")
-            else:
-                log_message(f"Reviewer processing {len(response.choices[0].message.tool_calls)} tool calls")
-            
-            messages.append(response.choices[0].message)
-            
-            for i, tool_call in enumerate(response.choices[0].message.tool_calls, 1):
+            # Process function calls
+            if has_tool_calls:
                 if is_verbose():
-                    print(f"   {i}. Executing: {tool_call.function.name}")
-                self._process_tool_call(tool_call, messages, video_path, temp_dir)
+                    print(f"🔧 Processing {len(response.choices[0].message.tool_calls)} standard tool calls:")
+                else:
+                    log_message(f"Reviewer processing {len(response.choices[0].message.tool_calls)} tool calls")
+                
+                messages.append(response.choices[0].message)
+                
+                for i, tool_call in enumerate(response.choices[0].message.tool_calls, 1):
+                    if is_verbose():
+                        print(f"   {i}. Executing: {tool_call.function.name}")
+                    self._process_tool_call(tool_call, messages, video_path, temp_dir)
+                    
+            else:
+                # Handle text-based function calls
+                if text_function_calls:
+                    if is_verbose():
+                        print(f"🔧 Processing {len(text_function_calls)} text-based function calls:")
+                    else:
+                        log_message(f"Reviewer processing {len(text_function_calls)} text-based tool calls")
+                    messages.append({"role": "assistant", "content": response_content})
+                    
+                    for i, func_call in enumerate(text_function_calls):
+                        if is_verbose():
+                            print(f"   {i+1}. Executing: {func_call['name']}")
+                        mock_tool_call = type('obj', (object,), {
+                            'id': f"text_call_{iteration_count}_{i}",
+                            'function': type('obj', (object,), {
+                                'name': func_call['name'],
+                                'arguments': json.dumps(func_call['parameters'])
+                            })()
+                        })()
+                        
+                        self._process_tool_call(mock_tool_call, messages, video_path, temp_dir)
+                elif not text_function_calls:
+                    messages.append({"role": "assistant", "content": response_content})
             
             # Make next API call
             log_message(f"Making reviewer API call - Iteration {iteration_count}")
@@ -539,6 +586,82 @@ Instructions:
                 'correct_answer': '',
                 'distinction_notes': 'Parsing failed'
             }
+    
+    def _parse_text_function_calls(self, response_content: str) -> List[Dict[str, Any]]:
+        """Parse function calls from text response"""
+        function_calls = []
+        
+        try:
+            # Pattern for complete function call format
+            full_pattern = r'\{[^{}]*"type"[^{}]*"function"[^{}]*"name"[^{}]*"parameters"[^{}]*\{[^{}]*\}[^{}]*\}'
+            full_matches = re.findall(full_pattern, response_content)
+            
+            # Pattern for simple function call format
+            simple_pattern = r'\{[^{}]*"name"[^{}]*"parameters"[^{}]*\{[^{}]*\}[^{}]*\}'
+            simple_matches = re.findall(simple_pattern, response_content)
+            
+            all_matches = full_matches + simple_matches
+            
+            for match in all_matches:
+                try:
+                    func_json = json.loads(match)
+                    if ("name" in func_json and "parameters" in func_json and
+                        func_json["name"] in ["VERIFY_SEGMENT", "VERIFY_FRAME"]):
+                        
+                        if "type" not in func_json:
+                            func_json["type"] = "function"
+                        function_calls.append(func_json)
+                except Exception:
+                    continue
+            
+            # Pattern for print(default_api.FUNCTION_NAME(...)) format
+            print_api_pattern = r'print\(default_api\.(VERIFY_SEGMENT|VERIFY_FRAME)\((.*?)\)\)'
+            print_api_matches = re.finditer(print_api_pattern, response_content, re.DOTALL)
+            
+            for match in print_api_matches:
+                function_name = match.group(1)
+                parameters_str = match.group(2).strip()
+                
+                try:
+                    # Parse parameters from string like "start_second = 10, end_second = 20"
+                    parameters = {}
+                    
+                    if function_name == "VERIFY_SEGMENT":
+                        # Extract start_second and end_second
+                        start_match = re.search(r'start_second\s*=\s*([\d.]+)', parameters_str)
+                        end_match = re.search(r'end_second\s*=\s*([\d.]+)', parameters_str)
+                        
+                        if start_match and end_match:
+                            parameters["start_second"] = float(start_match.group(1))
+                            parameters["end_second"] = float(end_match.group(1))
+                    
+                    elif function_name == "VERIFY_FRAME":
+                        # Extract timestamp_second
+                        timestamp_match = re.search(r'timestamp_second\s*=\s*([\d.]+)', parameters_str)
+                        
+                        if timestamp_match:
+                            parameters["timestamp_second"] = float(timestamp_match.group(1))
+                    
+                    # Create function call object if parameters were parsed successfully
+                    if parameters:
+                        function_calls.append({
+                            "type": "function",
+                            "name": function_name,
+                            "parameters": parameters
+                        })
+                        
+                        if is_verbose():
+                            log_message(f"📝 Reviewer detected print(default_api.{function_name}) pattern with params: {parameters}")
+                        
+                except Exception as e:
+                    if is_verbose():
+                        log_message(f"Failed to parse print(default_api.{function_name}) parameters: {str(e)}")
+                    continue
+                    
+        except Exception:
+            pass
+        
+        return function_calls
     
     def _process_tool_call(self, tool_call: Any, messages: List[Dict[str, Any]], 
                           video_path: str, temp_dir: str) -> None:

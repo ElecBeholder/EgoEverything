@@ -31,7 +31,7 @@ python main.py \
     --dataset-name "$DATASET_NAME" \
     --limit 2:3 \
     --question-factor 1 \
-    --sampling-density 1 \
+    --sampling-density 5 \
     --n-llms 5 \
     --qa-n-llms 1 \
     --temp-dir "tmp" \

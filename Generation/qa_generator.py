@@ -83,7 +83,7 @@ Within this scenario S, think of a question Q that the user might naturally ask 
 **CRITICAL** The analysis may contain errors, please cross-verify all facts using independent sources.
 
 ## Tools you can call
-You **CANNOT** see raw video, but you can make openai style function calls to gather more information:
+You **CANNOT** see raw video, but you can use tools to gather more information:
 **REFINE_SEGMENT(start_second, end_second)**  
 **REFINE_FRAME(timestamp_second)**  
 
@@ -508,6 +508,50 @@ This is a key frame sampled from video at {timestamp:.1f} seconds.
                             func_json["type"] = "function"
                         function_calls.append(func_json)
                 except Exception:
+                    continue
+            
+            # Pattern for print(default_api.FUNCTION_NAME(...)) format
+            print_api_pattern = r'print\(default_api\.(REFINE_SEGMENT|REFINE_FRAME)\((.*?)\)\)'
+            print_api_matches = re.finditer(print_api_pattern, response_content, re.DOTALL)
+            
+            for match in print_api_matches:
+                function_name = match.group(1)
+                parameters_str = match.group(2).strip()
+                
+                try:
+                    # Parse parameters from string like "start_second = 10, end_second = 20"
+                    parameters = {}
+                    
+                    if function_name == "REFINE_SEGMENT":
+                        # Extract start_second and end_second
+                        start_match = re.search(r'start_second\s*=\s*([\d.]+)', parameters_str)
+                        end_match = re.search(r'end_second\s*=\s*([\d.]+)', parameters_str)
+                        
+                        if start_match and end_match:
+                            parameters["start_second"] = float(start_match.group(1))
+                            parameters["end_second"] = float(end_match.group(1))
+                    
+                    elif function_name == "REFINE_FRAME":
+                        # Extract timestamp_second
+                        timestamp_match = re.search(r'timestamp_second\s*=\s*([\d.]+)', parameters_str)
+                        
+                        if timestamp_match:
+                            parameters["timestamp_second"] = float(timestamp_match.group(1))
+                    
+                    # Create function call object if parameters were parsed successfully
+                    if parameters:
+                        function_calls.append({
+                            "type": "function",
+                            "name": function_name,
+                            "parameters": parameters
+                        })
+                        
+                        if is_verbose():
+                            log_message(f"📝 Detected print(default_api.{function_name}) pattern with params: {parameters}")
+                        
+                except Exception as e:
+                    if is_verbose():
+                        log_message(f"Failed to parse print(default_api.{function_name}) parameters: {str(e)}")
                     continue
                     
         except Exception:

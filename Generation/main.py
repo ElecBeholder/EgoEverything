@@ -14,7 +14,7 @@ try:
         cleanup_temp_files, create_temp_dir, get_video_duration_minutes
     )
     from .video_loader import VideoLoader
-    from .frame_extractor import FrameExtractor
+    from .frame_extractor import FrameExtractor, SegmentFeatureExtractor
     from .object_detector import ObjectDetector
     from .gaze_processor import ObjectSelector
     from .qa_generator import QAGenerator
@@ -30,7 +30,7 @@ except ImportError:
         cleanup_temp_files, create_temp_dir, get_video_duration_minutes
     )
     from video_loader import VideoLoader
-    from frame_extractor import FrameExtractor
+    from frame_extractor import FrameExtractor, SegmentFeatureExtractor
     from object_detector import ObjectDetector
     from gaze_processor import ObjectSelector
     from qa_generator import QAGenerator
@@ -147,11 +147,58 @@ class VQAGenerationPipeline:
             log_simple("Extracting evidence timestamps")
             evidence_timestamps = self.evidence_extractor.extract_timestamps(qa_result['evidence'])
             
-            # Review and refine QA to MCQ
-            log_simple("Starting QA review and MCQ refinement")
+            # Extract evidence images before review
+            log_simple("Extracting evidence images for review")
+            evidence_images = []
+            segment_extractor = SegmentFeatureExtractor()
+            
+            # Extract frames from single frame timestamps
+            if evidence_timestamps.get("frames"):
+                for frame_ts in evidence_timestamps["frames"]:
+                    try:
+                        frame_path = self.frame_extractor.extract_frame_at_timestamp(
+                            video_path, frame_ts, temp_dir
+                        )
+                        evidence_images.append({
+                            "type": "frame",
+                            "timestamp": frame_ts,
+                            "path": frame_path
+                        })
+                        log_message(f"Extracted evidence frame at {frame_ts}s")
+                    except Exception as e:
+                        log_message(f"Failed to extract frame at {frame_ts}s: {str(e)}")
+            
+            # Extract representative frames from segments
+            if evidence_timestamps.get("segments"):
+                for segment in evidence_timestamps["segments"]:
+                    try:
+                        # Get representative frames from segment
+                        representative_frames = segment_extractor.get_representative_frames(
+                            video_path, segment['start'], segment['end'], 
+                            n_clusters=5, temp_dir=temp_dir
+                        )
+                        
+                        for frame_data in representative_frames[:3]:  # Take up to 3 frames per segment
+                            frame_path = self.frame_extractor.extract_frame_at_timestamp(
+                                video_path, frame_data['timestamp'], temp_dir
+                            )
+                            evidence_images.append({
+                                "type": "segment",
+                                "timestamp": frame_data['timestamp'],
+                                "segment_range": f"{segment['start']}s-{segment['end']}s",
+                                "path": frame_path
+                            })
+                        log_message(f"Extracted {len(representative_frames[:3])} frames from segment {segment['start']}s-{segment['end']}s")
+                    except Exception as e:
+                        log_message(f"Failed to extract segment {segment['start']}-{segment['end']}: {str(e)}")
+            
+            log_message(f"Total evidence images extracted: {len(evidence_images)}")
+            
+            # Review and refine QA to MCQ with evidence images
+            log_simple("Starting QA review and MCQ refinement with evidence images")
             local_reviewer = qa_reviewer if qa_reviewer is not None else self.qa_reviewer
             review_result = local_reviewer.review_and_refine(
-                qa_result['question'], qa_result['answer'], evidence_timestamps,
+                qa_result['question'], qa_result['answer'], evidence_images,
                 video_path, video_summary, temp_dir
             )
             
