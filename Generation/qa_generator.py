@@ -336,12 +336,7 @@ This is a key frame sampled from video at {timestamp:.1f} seconds.
         self.review_attempt_count += 1
         max_attempts = 3
 
-        log_message(f"REQUEST_REVIEW called (attempt {self.review_attempt_count}/{max_attempts})")
-
-        if is_verbose():
-            print("\n" + "="*80)
-            print(f"🔄 GENERATOR → REVIEWER (Attempt {self.review_attempt_count}/{max_attempts})")
-            print("="*80)
+        log_message(f"Review request (attempt {self.review_attempt_count}/{max_attempts})")
 
         try:
             # Import reviewer here to avoid circular imports
@@ -353,12 +348,7 @@ This is a key frame sampled from video at {timestamp:.1f} seconds.
             # Check if this is the first review request
             if self.reviewer_messages is None:
                 # First time: Create new reviewer session
-                if is_verbose():
-                    print("📤 FIRST REVIEW - Creating new reviewer session")
-                    print(f"   • Question: {question}")
-                    print(f"   • Options: {options_list}")
-                    print(f"   • Correct Answer: {correct_answer}")
-                    print(f"   • Evidence: {len(evidence_timestamps)} timestamps")
+                log_message("Creating new reviewer session")
 
                 # Initialize reviewer
                 self.reviewer = QAReviewerRefiner(self.client.api_key)
@@ -405,10 +395,7 @@ This is a key frame sampled from video at {timestamp:.1f} seconds.
 
             else:
                 # Subsequent review: Continue existing reviewer session
-                if is_verbose():
-                    print("📤 SUBSEQUENT REVIEW - Continuing reviewer session")
-                    print(f"   • Modified Question: {question}")
-                    print(f"   • Providing as tool response to previous PROVIDE_FEEDBACK")
+                log_message("Continuing reviewer session")
 
                 # Add modified QA as tool response to previous PROVIDE_FEEDBACK call
                 self.reviewer_messages.append({
@@ -457,9 +444,6 @@ Evidence Timestamps: {evidence_timestamps}"""
         while iteration_count < max_iterations:
             iteration_count += 1
 
-            if is_verbose():
-                print(f"\n📍 REVIEWER ITERATION {iteration_count}/{max_iterations}")
-
             # Check for tool calls
             has_tool_calls = (hasattr(response.choices[0].message, 'tool_calls') and
                             response.choices[0].message.tool_calls)
@@ -472,10 +456,7 @@ Evidence Timestamps: {evidence_timestamps}"""
                 text_function_calls = self._parse_reviewer_text_function_calls(response_content)
 
             if not has_tool_calls and not text_function_calls:
-                if is_verbose():
-                    print("⚠️  No tool calls from reviewer - reminding to use tools")
-                else:
-                    log_message("Reviewer didn't use tools - sending reminder")
+                log_message("Reviewer didn't use tools - sending reminder")
 
                 # Add assistant message if there's content
                 if response_content:
@@ -504,10 +485,6 @@ Evidence Timestamps: {evidence_timestamps}"""
                     func_name = tool_call.function.name
 
                     if func_name == "VERIFY_SEGMENT":
-                        # Handle VERIFY_SEGMENT
-                        if is_verbose():
-                            print(f"   🎞️  Reviewer calling VERIFY_SEGMENT")
-
                         response_text, frame_paths = self.reviewer.handle_verify_segment(
                             {'arguments': tool_call.function.arguments}, video_path, temp_dir
                         )
@@ -531,10 +508,6 @@ Evidence Timestamps: {evidence_timestamps}"""
                             self.reviewer_messages.append({"role": "user", "content": content})
 
                     elif func_name == "VERIFY_FRAME":
-                        # Handle VERIFY_FRAME
-                        if is_verbose():
-                            print(f"   🖼️  Reviewer calling VERIFY_FRAME")
-
                         response_text, frame_path = self.reviewer.handle_verify_frame(
                             {'arguments': tool_call.function.arguments}, video_path, temp_dir
                         )
@@ -561,10 +534,6 @@ Evidence Timestamps: {evidence_timestamps}"""
                             })
 
                     elif func_name == "PROVIDE_FEEDBACK":
-                        # Handle PROVIDE_FEEDBACK - this is the key decision point
-                        if is_verbose():
-                            print(f"   📝 Reviewer calling PROVIDE_FEEDBACK")
-
                         args = json.loads(tool_call.function.arguments)
                         all_pass = args.get("all_pass", False)
 
@@ -581,15 +550,7 @@ Evidence Timestamps: {evidence_timestamps}"""
                                 'review_passed': True,
                                 'review_attempts': self.review_attempt_count
                             }
-
-                            if is_verbose():
-                                print("\n📥 REVIEWER → GENERATOR:")
-                                print("     ✅ All checklist items PASSED")
-                                print("     🎉 MCQ approved!")
-                                print("="*80 + "\n")
-                            else:
-                                log_message("Review passed - all checklist items satisfied")
-
+                            log_message("Review passed")
                             return "APPROVED"
 
                         else:
@@ -605,37 +566,17 @@ Evidence Timestamps: {evidence_timestamps}"""
                                     'review_attempts': self.review_attempt_count,
                                     'final_feedback': json.dumps(args, indent=2)
                                 }
-
-                                if is_verbose():
-                                    print("\n📥 REVIEWER → GENERATOR:")
-                                    print(f"     ⚠️  Max attempts ({max_attempts}) reached")
-                                    print("     💾 Saving MCQ with review_not_passed flag")
-                                    print("="*80 + "\n")
-                                else:
-                                    log_message(f"Max review attempts reached")
-
+                                log_message(f"Max review attempts reached")
                                 return "MAX_ATTEMPTS_REACHED"
 
                             else:
                                 # Return feedback for generator to refine
                                 feedback_text = self._format_feedback(args)
-
-                                if is_verbose():
-                                    print("\n📥 REVIEWER → GENERATOR:")
-                                    print(f"     📋 Issues found (attempt {self.review_attempt_count}/{max_attempts})")
-                                    print(f"     🔄 Requesting refinement")
-                                    print("="*80 + "\n")
-                                else:
-                                    log_message(f"Review feedback provided for refinement")
-
+                                log_message(f"Review feedback provided")
                                 return feedback_text
 
             else:
                 # Process text-based function calls
-                if is_verbose():
-                    print(f"🔧 Processing {len(text_function_calls)} text-based reviewer tool calls")
-                else:
-                    log_message(f"Processing {len(text_function_calls)} text-based reviewer tool calls")
 
                 # Add assistant message
                 self.reviewer_messages.append({"role": "assistant", "content": response_content})
@@ -654,9 +595,6 @@ Evidence Timestamps: {evidence_timestamps}"""
                     })()
 
                     if func_name == "VERIFY_SEGMENT":
-                        if is_verbose():
-                            print(f"   🎞️  Reviewer calling VERIFY_SEGMENT (text format)")
-
                         response_text, frame_paths = self.reviewer.handle_verify_segment(
                             {'arguments': mock_tool_call.function.arguments}, video_path, temp_dir
                         )
@@ -678,9 +616,6 @@ Evidence Timestamps: {evidence_timestamps}"""
                             self.reviewer_messages.append({"role": "user", "content": content})
 
                     elif func_name == "VERIFY_FRAME":
-                        if is_verbose():
-                            print(f"   🖼️  Reviewer calling VERIFY_FRAME (text format)")
-
                         response_text, frame_path = self.reviewer.handle_verify_frame(
                             {'arguments': mock_tool_call.function.arguments}, video_path, temp_dir
                         )
@@ -705,9 +640,6 @@ Evidence Timestamps: {evidence_timestamps}"""
                             })
 
                     elif func_name == "PROVIDE_FEEDBACK":
-                        if is_verbose():
-                            print(f"   📝 Reviewer calling PROVIDE_FEEDBACK (text format)")
-
                         args = func_call['parameters']
                         all_pass = args.get("all_pass", False)
 
@@ -722,15 +654,7 @@ Evidence Timestamps: {evidence_timestamps}"""
                                 'review_passed': True,
                                 'review_attempts': self.review_attempt_count
                             }
-
-                            if is_verbose():
-                                print("\n📥 REVIEWER → GENERATOR:")
-                                print("     ✅ All checklist items PASSED")
-                                print("     🎉 MCQ approved!")
-                                print("="*80 + "\n")
-                            else:
-                                log_message("Review passed")
-
+                            log_message("Review passed")
                             return "APPROVED"
 
                         else:
@@ -744,26 +668,12 @@ Evidence Timestamps: {evidence_timestamps}"""
                                     'review_attempts': self.review_attempt_count,
                                     'final_feedback': json.dumps(args, indent=2)
                                 }
-
-                                if is_verbose():
-                                    print("\n📥 REVIEWER → GENERATOR:")
-                                    print(f"     ⚠️  Max attempts ({max_attempts}) reached")
-                                    print("="*80 + "\n")
-                                else:
-                                    log_message(f"Max review attempts reached")
-
+                                log_message(f"Max review attempts reached")
                                 return "MAX_ATTEMPTS_REACHED"
 
                             else:
                                 feedback_text = self._format_feedback(args)
-
-                                if is_verbose():
-                                    print("\n📥 REVIEWER → GENERATOR:")
-                                    print(f"     📋 Issues found (attempt {self.review_attempt_count}/{max_attempts})")
-                                    print("="*80 + "\n")
-                                else:
-                                    log_message(f"Review feedback provided")
-
+                                log_message(f"Review feedback provided")
                                 return feedback_text
 
             # Continue reviewer conversation
@@ -869,6 +779,32 @@ Evidence Timestamps: {evidence_timestamps}"""
 
     def make_api_call(self, messages: List[Dict[str, Any]], tools: List[Dict[str, Any]]) -> Any:
         """Make API call to LLM with caching and usage tracking"""
+        # Log request summary in verbose mode
+        if is_verbose():
+            print("\n" + "="*80)
+            print("📤 SENDING TO AGENT:")
+            print("="*80)
+            for i, msg in enumerate(messages, 1):
+                # Handle both dict and ChatCompletionMessage objects
+                if isinstance(msg, dict):
+                    role = msg.get('role', 'unknown')
+                    content = msg.get('content', '')
+                else:
+                    role = getattr(msg, 'role', 'unknown')
+                    content = getattr(msg, 'content', '')
+
+                if isinstance(content, list):
+                    content_summary = f"{len(content)} items ("
+                    types = []
+                    for item in content:
+                        if isinstance(item, dict):
+                            types.append(item.get('type', 'unknown'))
+                    content_summary += ", ".join(types) + ")"
+                else:
+                    content_summary = content[:100] + "..." if len(str(content)) > 100 else str(content)
+                print(f"  {i}. [{role}] {content_summary}")
+            print("="*80 + "\n")
+
         response = self.client.chat.completions.create(
             model="google/gemini-2.5-flash",
             messages=messages,
@@ -880,24 +816,24 @@ Evidence Timestamps: {evidence_timestamps}"""
                 "usage": {"include": True}  # Enable detailed usage tracking for cache metrics
             }
         )
-        
-        # Output Gemini response content to terminal only in verbose mode
+
+        # Log agent response in verbose mode
         if is_verbose():
             response_content = safe_get_response_content(response)
             if response_content:
                 print("\n" + "="*80)
-                print("🤖 GEMINI RESPONSE:")
+                print("🤖 AGENT RESPONSE:")
                 print("="*80)
                 print(response_content)
                 print("="*80 + "\n")
-            
-            # Check for tool calls and display them
+
+            # Log tool calls
             if hasattr(response.choices[0].message, 'tool_calls') and response.choices[0].message.tool_calls:
-                print("🔧 TOOL CALLS DETECTED:")
+                print("🔧 TOOL CALLS:")
                 for i, tool_call in enumerate(response.choices[0].message.tool_calls, 1):
                     print(f"  {i}. {tool_call.function.name}({tool_call.function.arguments})")
                 print()
-        
+
         # Track token usage including cached tokens
         token_usage = safe_get_token_usage(response)
         if token_usage:
@@ -905,16 +841,14 @@ Evidence Timestamps: {evidence_timestamps}"""
                 if key in token_usage:
                     self.total_tokens[key] += token_usage[key]
             
-            # Log cache usage details if available
+            # Track and log cache usage (without discount)
             cached_tokens = token_usage.get('cached_tokens', 0)
             if cached_tokens > 0:
                 cache_discount = token_usage.get('cache_discount', 0)
                 self.cache_stats['cache_hits'] += 1
                 self.cache_stats['cached_tokens'] += cached_tokens
                 self.cache_stats['cache_discount'] += cache_discount
-                log_message(f"💾 CACHE HIT: {cached_tokens} tokens saved, discount: ${cache_discount:.4f}")
-            else:
-                log_message(f"⚠️  No cached tokens detected in response")
+                log_message(f"💾 Cache hit: {cached_tokens} tokens cached")
         
         return response
     
@@ -939,15 +873,7 @@ Evidence Timestamps: {evidence_timestamps}"""
         messages.extend(self.create_initial_message(keyframe_path, timestamp, video_summary, selected_object))
         
         # Initial API call
-        if is_verbose():
-            print("\n" + "🚀 STARTING QA GENERATION" + "\n")
-            print("📝 INITIAL CONTEXT:")
-            print(f"   • Video: {video_path}")
-            print(f"   • Timestamp: {timestamp:.1f}s")
-            print(f"   • Selected Object: {selected_object.get('name', 'unknown')}")
-            print()
-        else:
-            log_message(f"Generating QA for object '{selected_object.get('name', 'unknown')}' at {timestamp:.1f}s")
+        log_message(f"Generating QA for object '{selected_object.get('name', 'unknown')}' at {timestamp:.1f}s")
         
         log_simple("Making initial API call")
         response = self.make_api_call(messages, tools)
@@ -958,10 +884,6 @@ Evidence Timestamps: {evidence_timestamps}"""
         
         while iteration_count < max_iterations:
             iteration_count += 1
-            
-            if is_verbose():
-                print(f"\n📍 ITERATION {iteration_count} / {max_iterations}")
-                print("-" * 50)
             
             # Check for tool calls
             has_tool_calls = (hasattr(response.choices[0].message, 'tool_calls') and 
@@ -976,39 +898,22 @@ Evidence Timestamps: {evidence_timestamps}"""
             
             # If no function calls, break the loop
             if not has_tool_calls and not text_function_calls:
-                if is_verbose():
-                    print("✅ No more tool calls - Generation complete")
                 break
             
             # Process function calls
             should_stop = False
             if has_tool_calls:
-                if is_verbose():
-                    print(f"🔧 Processing {len(response.choices[0].message.tool_calls)} standard tool calls:")
-                else:
-                    log_message(f"Processing {len(response.choices[0].message.tool_calls)} tool calls")
                 messages.append(response.choices[0].message)
-
-                for i, tool_call in enumerate(response.choices[0].message.tool_calls, 1):
-                    if is_verbose():
-                        print(f"   {i}. Executing: {tool_call.function.name}")
+                for tool_call in response.choices[0].message.tool_calls:
                     stop_flag = self._process_tool_call(tool_call, messages, video_path, temp_dir, video_summary)
                     if stop_flag:
                         should_stop = True
                         break
-
             else:
                 # Handle text-based function calls
                 if text_function_calls:
-                    if is_verbose():
-                        print(f"🔧 Processing {len(text_function_calls)} text-based function calls:")
-                    else:
-                        log_message(f"Processing {len(text_function_calls)} text-based tool calls")
                     messages.append({"role": "assistant", "content": response_content})
-
                     for i, func_call in enumerate(text_function_calls):
-                        if is_verbose():
-                            print(f"   {i+1}. Executing: {func_call['name']}")
                         mock_tool_call = type('obj', (object,), {
                             'id': f"text_call_{iteration_count}_{i}",
                             'function': type('obj', (object,), {
@@ -1016,7 +921,6 @@ Evidence Timestamps: {evidence_timestamps}"""
                                 'arguments': json.dumps(func_call['parameters'])
                             })()
                         })()
-
                         stop_flag = self._process_tool_call(mock_tool_call, messages, video_path, temp_dir, video_summary)
                         if stop_flag:
                             should_stop = True
@@ -1026,8 +930,6 @@ Evidence Timestamps: {evidence_timestamps}"""
 
             # Check if we should stop after processing tool calls
             if should_stop:
-                if is_verbose():
-                    print("\n🛑 Stopping generation - Review approved or max attempts reached")
                 break
             
             # Make next API call
@@ -1037,13 +939,12 @@ Evidence Timestamps: {evidence_timestamps}"""
         # If we have approved MCQ, return it directly without any further processing
         if self.approved_mcq:
             log_simple("QA generation completed")
-            log_message(f"Total tokens used: {self.total_tokens['total_tokens']}")
+            log_message(f"Total tokens: {self.total_tokens['total_tokens']}")
 
-            # Log cache statistics
+            # Log cache statistics (without discount)
             if self.cache_stats['cache_hits'] > 0:
-                log_message(f"🎯 CACHE STATS: {self.cache_stats['cache_hits']} hits, "
-                           f"{self.cache_stats['cached_tokens']} tokens cached, "
-                           f"${self.cache_stats['cache_discount']:.4f} total discount")
+                log_message(f"🎯 Cache stats: {self.cache_stats['cache_hits']} hits, "
+                           f"{self.cache_stats['cached_tokens']} tokens cached")
 
             question = self.approved_mcq['question']
             options = self.approved_mcq['options']
@@ -1416,26 +1317,17 @@ Ensure the JSON is valid and follows the required structure."""
                           video_path: str, temp_dir: str, video_summary: str = "") -> bool:
         """Process individual tool call and return True if should stop iteration"""
         if tool_call.function.name == "REFINE_SEGMENT":
-            if is_verbose():
-                print(f"     🎞️  REFINE_SEGMENT: {tool_call.function.arguments}")
-            else:
-                # Parse arguments for simple logging
-                try:
-                    args = json.loads(tool_call.function.arguments)
-                    start_s = args.get("start_second", "?")
-                    end_s = args.get("end_second", "?")
-                    log_message(f"Refining video segment {start_s}s-{end_s}s")
-                except:
-                    log_message("Refining video segment")
-            
+            try:
+                args = json.loads(tool_call.function.arguments)
+                start_s = args.get("start_second", "?")
+                end_s = args.get("end_second", "?")
+                log_message(f"Refining segment {start_s}-{end_s}s")
+            except:
+                log_message("Refining segment")
+
             response_text, frame_paths = self.handle_refine_segment(
                 {'arguments': tool_call.function.arguments}, video_path, temp_dir
             )
-            
-            if is_verbose():
-                print(f"     ✅ Extracted {len(frame_paths)} representative frames")
-            else:
-                log_message(f"Extracted {len(frame_paths)} representative frames")
             
             # Add tool response
             messages.append({
@@ -1458,31 +1350,16 @@ Ensure the JSON is valid and follows the required structure."""
             return False  # Continue iteration
 
         elif tool_call.function.name == "REFINE_FRAME":
-            if is_verbose():
-                print(f"     🖼️  REFINE_FRAME: {tool_call.function.arguments}")
-            else:
-                # Parse arguments for simple logging
-                try:
-                    args = json.loads(tool_call.function.arguments)
-                    timestamp = args.get("timestamp_second", "?")
-                    log_message(f"Extracting frame at {timestamp}s")
-                except:
-                    log_message("Extracting frame")
-            
+            try:
+                args = json.loads(tool_call.function.arguments)
+                timestamp = args.get("timestamp_second", "?")
+                log_message(f"Extracting frame at {timestamp}s")
+            except:
+                log_message("Extracting frame")
+
             response_text, frame_path = self.handle_refine_frame(
                 {'arguments': tool_call.function.arguments}, video_path, temp_dir
             )
-            
-            if is_verbose():
-                if frame_path and os.path.exists(frame_path):
-                    print(f"     ✅ Extracted frame: {os.path.basename(frame_path)}")
-                else:
-                    print(f"     ❌ Failed to extract frame")
-            else:
-                if frame_path and os.path.exists(frame_path):
-                    log_message(f"Frame extracted successfully")
-                else:
-                    log_message(f"Frame extraction failed")
             
             # Add tool response
             messages.append({
@@ -1507,10 +1384,7 @@ Ensure the JSON is valid and follows the required structure."""
             return False  # Continue iteration
 
         elif tool_call.function.name == "REQUEST_REVIEW":
-            if is_verbose():
-                print(f"     📝 REQUEST_REVIEW: Submitting MCQ for review")
-            else:
-                log_message("Submitting MCQ for review")
+            log_message("Submitting MCQ for review")
 
             review_feedback = self.handle_request_review(
                 {'arguments': tool_call.function.arguments}, video_path, video_summary, temp_dir
@@ -1518,12 +1392,7 @@ Ensure the JSON is valid and follows the required structure."""
 
             # Check if review approved or max attempts reached
             if review_feedback == "APPROVED":
-                if is_verbose():
-                    print(f"     ✅ Review APPROVED! Stopping generation.")
-                else:
-                    log_message("Review APPROVED - stopping generation")
-
-                # Add final tool response
+                log_message("Review approved")
                 messages.append({
                     "role": "tool",
                     "tool_call_id": tool_call.id,
@@ -1532,12 +1401,7 @@ Ensure the JSON is valid and follows the required structure."""
                 return True  # Signal to stop iteration
 
             elif review_feedback == "MAX_ATTEMPTS_REACHED":
-                if is_verbose():
-                    print(f"     ⚠️  Max attempts reached! Saving current MCQ and stopping.")
-                else:
-                    log_message("Max review attempts reached - stopping generation")
-
-                # Add final tool response
+                log_message("Max review attempts reached")
                 messages.append({
                     "role": "tool",
                     "tool_call_id": tool_call.id,
@@ -1547,12 +1411,7 @@ Ensure the JSON is valid and follows the required structure."""
 
             else:
                 # Continue with feedback for refinement
-                if is_verbose():
-                    print(f"     📋 Review feedback received - refinement needed")
-                else:
-                    log_message("Review feedback received")
-
-                # Add tool response
+                log_message("Review feedback received")
                 messages.append({
                     "role": "tool",
                     "tool_call_id": tool_call.id,

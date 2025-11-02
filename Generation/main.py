@@ -14,12 +14,9 @@ try:
         cleanup_temp_files, create_temp_dir, get_video_duration_minutes
     )
     from .video_loader import VideoLoader
-    from .frame_extractor import FrameExtractor, SegmentFeatureExtractor
     from .object_detector import ObjectDetector
-    from .gaze_processor import ObjectSelector
     from .qa_generator import QAGenerator
     from .qa_reviewer import QAReviewerRefiner
-    from .evidence_extractor import EvidenceTimestampExtractor
     from .object_sampler import ObjectSampler
 except ImportError:
     import sys
@@ -30,12 +27,9 @@ except ImportError:
         cleanup_temp_files, create_temp_dir, get_video_duration_minutes
     )
     from video_loader import VideoLoader
-    from frame_extractor import FrameExtractor, SegmentFeatureExtractor
     from object_detector import ObjectDetector
-    from gaze_processor import ObjectSelector
     from qa_generator import QAGenerator
     from qa_reviewer import QAReviewerRefiner
-    from evidence_extractor import EvidenceTimestampExtractor
     from object_sampler import ObjectSampler
 
 
@@ -50,12 +44,9 @@ class VQAGenerationPipeline:
         
         # Initialize components
         self.video_loader = VideoLoader(dataset_path)
-        self.frame_extractor = FrameExtractor()
         self.object_detector = ObjectDetector(api_key)
-        self.object_selector = ObjectSelector()
         self.qa_generator = QAGenerator(api_key)
         self.qa_reviewer = QAReviewerRefiner(api_key)
-        self.evidence_extractor = EvidenceTimestampExtractor(api_key)
         self.object_sampler = ObjectSampler(api_key)
         self.sampling_density = 60.0
         self.qa_n_llms = 30

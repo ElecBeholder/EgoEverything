@@ -336,6 +336,32 @@ Step 5: Call PROVIDE_FEEDBACK tool to submit your review results
     
     def make_api_call(self, messages: List[Dict[str, Any]], tools: List[Dict[str, Any]]) -> Any:
         """Make API call to LLM"""
+        # Log request summary in verbose mode
+        if is_verbose():
+            print("\n" + "="*80)
+            print("📤 SENDING TO REVIEWER:")
+            print("="*80)
+            for i, msg in enumerate(messages, 1):
+                # Handle both dict and ChatCompletionMessage objects
+                if isinstance(msg, dict):
+                    role = msg.get('role', 'unknown')
+                    content = msg.get('content', '')
+                else:
+                    role = getattr(msg, 'role', 'unknown')
+                    content = getattr(msg, 'content', '')
+
+                if isinstance(content, list):
+                    content_summary = f"{len(content)} items ("
+                    types = []
+                    for item in content:
+                        if isinstance(item, dict):
+                            types.append(item.get('type', 'unknown'))
+                    content_summary += ", ".join(types) + ")"
+                else:
+                    content_summary = content[:100] + "..." if len(str(content)) > 100 else str(content)
+                print(f"  {i}. [{role}] {content_summary}")
+            print("="*80 + "\n")
+
         response = self.client.chat.completions.create(
             model="google/gemini-2.5-flash",
             messages=messages,
@@ -347,8 +373,8 @@ Step 5: Call PROVIDE_FEEDBACK tool to submit your review results
                 "usage": {"include": True}
             }
         )
-        
-        # Output response in verbose mode
+
+        # Log reviewer response in verbose mode
         if is_verbose():
             response_content = safe_get_response_content(response)
             if response_content:
@@ -357,13 +383,14 @@ Step 5: Call PROVIDE_FEEDBACK tool to submit your review results
                 print("="*80)
                 print(response_content)
                 print("="*80 + "\n")
-            
+
+            # Log tool calls
             if hasattr(response.choices[0].message, 'tool_calls') and response.choices[0].message.tool_calls:
                 print("🔧 REVIEWER TOOL CALLS:")
                 for i, tool_call in enumerate(response.choices[0].message.tool_calls, 1):
                     print(f"  {i}. {tool_call.function.name}({tool_call.function.arguments})")
                 print()
-        
+
         # Track token usage
         token_usage = safe_get_token_usage(response)
         if token_usage:
@@ -377,7 +404,7 @@ Step 5: Call PROVIDE_FEEDBACK tool to submit your review results
                 self.cache_stats['cache_hits'] += 1
                 self.cache_stats['cached_tokens'] += cached_tokens
                 self.cache_stats['cache_discount'] += cache_discount
-                log_message(f"💾 REVIEWER CACHE HIT: {cached_tokens} tokens saved, discount: ${cache_discount:.4f}")
+                log_message(f"💾 Reviewer cache hit: {cached_tokens} tokens cached")
         
         return response
     
@@ -388,18 +415,9 @@ Step 5: Call PROVIDE_FEEDBACK tool to submit your review results
                          correct_answer: str = None) -> Dict[str, Any]:
         """Review MCQ for quality and provide feedback - no refinement, just evaluation"""
         if options and len(options) == 5:
-            log_message("Starting MCQ review for quality evaluation")
-            if is_verbose():
-                print("\n🔍 STARTING MCQ QUALITY REVIEW")
-                print("="*60)
-                print("📋 REVIEW CONTEXT:")
-                print(f"   • Question: {question}")
-                print(f"   • Options: {len(options)} choices provided")
-                print(f"   • Correct Answer: {correct_answer}")
-                print(f"   • Evidence images: {len(evidence_images)} images")
-                print()
+            log_message("Starting MCQ review")
         else:
-            log_message("Starting simple QA review and MCQ refinement with evidence images")
+            log_message("Starting QA review")
         
         # Setup tools and system message
         tools, system_message = self.setup_tools_and_system_message()
@@ -410,17 +428,6 @@ Step 5: Call PROVIDE_FEEDBACK tool to submit your review results
             question, answer, evidence_images, video_summary, options, correct_answer
         ))
         
-        # Verbose output handled above for MCQ, here handle simple Q&A case
-        if not (options and len(options) == 5):
-            if is_verbose():
-                print("\n" + "🔍 STARTING QA REVIEW & REFINEMENT" + "\n")
-                print("📝 CONTEXT:")
-                print(f"   • Question: {question}")
-                print(f"   • Answer: {answer}")
-                print(f"   • Evidence images: {len(evidence_images)} images provided")
-                print()
-            else:
-                log_message(f"Reviewing QA: '{question}' -> '{answer}'")
         
         log_simple("Making initial review API call")
         response = self.make_api_call(messages, tools)
@@ -431,10 +438,6 @@ Step 5: Call PROVIDE_FEEDBACK tool to submit your review results
         
         while iteration_count < max_iterations:
             iteration_count += 1
-            
-            if is_verbose():
-                print(f"\n📍 REVIEW ITERATION {iteration_count} / {max_iterations}")
-                print("-" * 50)
             
             # Check for tool calls
             has_tool_calls = (hasattr(response.choices[0].message, 'tool_calls') and 
@@ -449,36 +452,18 @@ Step 5: Call PROVIDE_FEEDBACK tool to submit your review results
             
             # If no function calls, break
             if not has_tool_calls and not text_function_calls:
-                if is_verbose():
-                    print("✅ No more tool calls - Review complete")
                 break
             
             # Process function calls
             if has_tool_calls:
-                if is_verbose():
-                    print(f"🔧 Processing {len(response.choices[0].message.tool_calls)} standard tool calls:")
-                else:
-                    log_message(f"Reviewer processing {len(response.choices[0].message.tool_calls)} tool calls")
-                
                 messages.append(response.choices[0].message)
-                
-                for i, tool_call in enumerate(response.choices[0].message.tool_calls, 1):
-                    if is_verbose():
-                        print(f"   {i}. Executing: {tool_call.function.name}")
+                for tool_call in response.choices[0].message.tool_calls:
                     self._process_tool_call(tool_call, messages, video_path, temp_dir)
-                    
             else:
                 # Handle text-based function calls
                 if text_function_calls:
-                    if is_verbose():
-                        print(f"🔧 Processing {len(text_function_calls)} text-based function calls:")
-                    else:
-                        log_message(f"Reviewer processing {len(text_function_calls)} text-based tool calls")
                     messages.append({"role": "assistant", "content": response_content})
-                    
                     for i, func_call in enumerate(text_function_calls):
-                        if is_verbose():
-                            print(f"   {i+1}. Executing: {func_call['name']}")
                         mock_tool_call = type('obj', (object,), {
                             'id': f"text_call_{iteration_count}_{i}",
                             'function': type('obj', (object,), {
@@ -486,7 +471,6 @@ Step 5: Call PROVIDE_FEEDBACK tool to submit your review results
                                 'arguments': json.dumps(func_call['parameters'])
                             })()
                         })()
-                        
                         self._process_tool_call(mock_tool_call, messages, video_path, temp_dir)
                 elif not text_function_calls:
                     messages.append({"role": "assistant", "content": response_content})
@@ -496,18 +480,7 @@ Step 5: Call PROVIDE_FEEDBACK tool to submit your review results
             response = self.make_api_call(messages, tools)
         
         # Get final result
-        if options and len(options) == 5:
-            if is_verbose():
-                print("\n🎯 EXTRACTING REVIEW FEEDBACK")
-                print("=" * 50)
-            else:
-                log_message("Finalizing MCQ review feedback")
-        else:
-            if is_verbose():
-                print("\n🎯 EXTRACTING REVIEW & REFINEMENT RESULT")
-                print("=" * 50)
-            else:
-                log_message("Finalizing review and refinement")
+        log_message("Finalizing review")
         
         final_result = safe_get_response_content(response)
         
@@ -522,22 +495,15 @@ Step 5: Call PROVIDE_FEEDBACK tool to submit your review results
         
         if not final_result:
             final_result = "Review and refinement failed to complete"
-        
-        if final_result and is_verbose():
-            print("📄 FINAL RESULT:")
-            print("-" * 50)
-            print(final_result)
-            print("-" * 50)
-        
-        log_simple("QA review and refinement completed")
-        log_message(f"Reviewer total tokens used: {self.total_tokens['total_tokens']}")
-        
-        # Log cache statistics
+
+        log_simple("QA review completed")
+        log_message(f"Reviewer total tokens: {self.total_tokens['total_tokens']}")
+
+        # Log cache statistics (without discount)
         if self.cache_stats['cache_hits'] > 0:
-            log_message(f"🎯 REVIEWER CACHE STATS: {self.cache_stats['cache_hits']} hits, "
-                       f"{self.cache_stats['cached_tokens']} tokens cached, "
-                       f"${self.cache_stats['cache_discount']:.4f} total discount")
-        
+            log_message(f"🎯 Reviewer cache stats: {self.cache_stats['cache_hits']} hits, "
+                       f"{self.cache_stats['cached_tokens']} tokens cached")
+
         # Parse the response based on mode
         if options and len(options) == 5:
             # MCQ review mode - parse feedback
@@ -545,10 +511,6 @@ Step 5: Call PROVIDE_FEEDBACK tool to submit your review results
             if final_result.strip().lower().endswith("pass"):
                 parsed_result = {"status": "pass", "feedback": None}
                 success = True
-                if is_verbose():
-                    print("🎉 DETECTED 'pass' at end of response - MCQ approved!")
-                    if final_result.strip().lower() != "pass":
-                        print("⚠️  NOTE: Response contained extra text before 'pass' - will improve prompt")
             else:
                 parsed_result = self.parse_feedback_response(final_result)
                 success = parsed_result.get('status') == 'feedback_provided'
@@ -790,29 +752,21 @@ Step 5: Call PROVIDE_FEEDBACK tool to submit your review results
         
         return function_calls
     
-    def _process_tool_call(self, tool_call: Any, messages: List[Dict[str, Any]], 
+    def _process_tool_call(self, tool_call: Any, messages: List[Dict[str, Any]],
                           video_path: str, temp_dir: str) -> None:
         """Process individual tool call"""
         if tool_call.function.name == "VERIFY_SEGMENT":
-            if is_verbose():
-                print(f"     🎞️  VERIFY_SEGMENT: {tool_call.function.arguments}")
-            else:
-                try:
-                    args = json.loads(tool_call.function.arguments)
-                    start_s = args.get("start_second", "?")
-                    end_s = args.get("end_second", "?")
-                    log_message(f"Verifying segment {start_s}s-{end_s}s")
-                except:
-                    log_message("Verifying video segment")
-            
+            try:
+                args = json.loads(tool_call.function.arguments)
+                start_s = args.get("start_second", "?")
+                end_s = args.get("end_second", "?")
+                log_message(f"Verifying segment {start_s}-{end_s}s")
+            except:
+                log_message("Verifying segment")
+
             response_text, frame_paths = self.handle_verify_segment(
                 {'arguments': tool_call.function.arguments}, video_path, temp_dir
             )
-            
-            if is_verbose():
-                print(f"     ✅ Extracted {len(frame_paths)} frames")
-            else:
-                log_message(f"Extracted {len(frame_paths)} verification frames")
             
             # Add tool response
             messages.append({
@@ -836,30 +790,16 @@ Step 5: Call PROVIDE_FEEDBACK tool to submit your review results
                 messages.append({"role": "user", "content": content})
                 
         elif tool_call.function.name == "VERIFY_FRAME":
-            if is_verbose():
-                print(f"     🖼️  VERIFY_FRAME: {tool_call.function.arguments}")
-            else:
-                try:
-                    args = json.loads(tool_call.function.arguments)
-                    timestamp = args.get("timestamp_second", "?")
-                    log_message(f"Verifying frame at {timestamp}s")
-                except:
-                    log_message("Verifying frame")
-            
+            try:
+                args = json.loads(tool_call.function.arguments)
+                timestamp = args.get("timestamp_second", "?")
+                log_message(f"Verifying frame at {timestamp}s")
+            except:
+                log_message("Verifying frame")
+
             response_text, frame_path = self.handle_verify_frame(
                 {'arguments': tool_call.function.arguments}, video_path, temp_dir
             )
-            
-            if is_verbose():
-                if frame_path and os.path.exists(frame_path):
-                    print(f"     ✅ Frame extracted: {os.path.basename(frame_path)}")
-                else:
-                    print(f"     ❌ Failed to extract frame")
-            else:
-                if frame_path and os.path.exists(frame_path):
-                    log_message(f"Frame extracted successfully")
-                else:
-                    log_message(f"Frame extraction failed")
             
             # Add tool response
             messages.append({
