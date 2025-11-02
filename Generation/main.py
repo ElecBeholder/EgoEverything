@@ -142,113 +142,49 @@ class VQAGenerationPipeline:
             if not qa_result['success']:
                 log_simple("QA generation failed")
                 return None
-            
-            # Extract evidence timestamps
-            log_simple("Extracting evidence timestamps")
-            evidence_timestamps = self.evidence_extractor.extract_timestamps(qa_result['evidence'])
-            
-            # Extract evidence images before review
-            log_simple("Extracting evidence images for review")
-            evidence_images = []
-            segment_extractor = SegmentFeatureExtractor()
-            
-            # Extract frames from single frame timestamps
-            if evidence_timestamps.get("frames"):
-                for frame_ts in evidence_timestamps["frames"]:
-                    try:
-                        frame_path = self.frame_extractor.extract_frame_at_timestamp(
-                            video_path, frame_ts, temp_dir
-                        )
-                        evidence_images.append({
-                            "type": "frame",
-                            "timestamp": frame_ts,
-                            "path": frame_path
-                        })
-                        log_message(f"Extracted evidence frame at {frame_ts}s")
-                    except Exception as e:
-                        log_message(f"Failed to extract frame at {frame_ts}s: {str(e)}")
-            
-            # Extract representative frames from segments
-            if evidence_timestamps.get("segments"):
-                for segment in evidence_timestamps["segments"]:
-                    try:
-                        # Get representative frames from segment
-                        representative_frames = segment_extractor.get_representative_frames(
-                            video_path, segment['start'], segment['end'], 
-                            n_clusters=5, temp_dir=temp_dir
-                        )
-                        
-                        for frame_data in representative_frames[:3]:  # Take up to 3 frames per segment
-                            frame_path = self.frame_extractor.extract_frame_at_timestamp(
-                                video_path, frame_data['timestamp'], temp_dir
-                            )
-                            evidence_images.append({
-                                "type": "segment",
-                                "timestamp": frame_data['timestamp'],
-                                "segment_range": f"{segment['start']}s-{segment['end']}s",
-                                "path": frame_path
-                            })
-                        log_message(f"Extracted {len(representative_frames[:3])} frames from segment {segment['start']}s-{segment['end']}s")
-                    except Exception as e:
-                        log_message(f"Failed to extract segment {segment['start']}-{segment['end']}: {str(e)}")
-            
-            log_message(f"Total evidence images extracted: {len(evidence_images)}")
-            
-            # Review and refine QA to MCQ with evidence images
-            log_simple("Starting QA review and MCQ refinement with evidence images")
-            local_reviewer = qa_reviewer if qa_reviewer is not None else self.qa_reviewer
-            review_result = local_reviewer.review_and_refine(
-                qa_result['question'], qa_result['answer'], evidence_images,
-                video_path, video_summary, temp_dir
-            )
-            
-            # Log detailed review and refinement results
-            if review_result['success']:
-                parsed_result = review_result['parsed_result']
-                log_simple(f"QA Review and refinement completed")
-                log_message("=== REVIEW & REFINEMENT RESULTS ===")
-                log_message(f"Review Checklist:")
-                for check_name, check_result in parsed_result['review_checklist'].items():
-                    log_message(f"  - {check_name}: {check_result}")
-                log_message(f"Refinement Rationale: {parsed_result['refinement_rationale']}")
-                log_message(f"Refined Question: {parsed_result['refined_question']}")
-                log_message(f"Options: {parsed_result['refined_options']}")
-                log_message(f"Correct Answer: {parsed_result['correct_answer']}")
-                log_message(f"Distinction Notes: {parsed_result['distinction_notes']}")
-                log_message("=== END REVIEW & REFINEMENT ===")
-            else:
-                log_simple("QA review and refinement failed")
-                return None
-            
-            # Create result with refined MCQ from review
+
+            # QA generation already includes internal review and MCQ generation
+            # Use the approved MCQ directly
+
             # Convert correct answer letter to index
-            correct_index = None
-            if parsed_result['correct_answer'] in 'ABCDE':
-                correct_index = ord(parsed_result['correct_answer']) - ord('A')
-            
+            correct_answer = qa_result.get('correct_answer', 'A')
+            correct_index = ord(correct_answer) - ord('A') if correct_answer in 'ABCDE' else 0
+
+            # Get options from qa_result
+            options = qa_result.get('options', [])
+
+            # Log review results
+            review_passed = qa_result.get('review_passed', False)
+            review_attempts = qa_result.get('review_attempts', 0)
+
+            if review_passed:
+                log_simple(f"MCQ approved by internal reviewer on attempt {review_attempts}")
+            else:
+                log_simple(f"MCQ generated but did not pass review after {review_attempts} attempts")
+
+            # Create result with MCQ from internal review
             result = {
                 'key_frame_timestamp': timestamp,
                 'key_object': {
                     'name': selected_object['name'],
-                    'bbox': selected_object['bbox']  # Use original bbox (not normalized)
+                    'bbox': selected_object['bbox']
                 },
                 'raw_output': {
                     'raw_qa': f"{qa_result['question']}? {qa_result['answer']}",
-                    'CoT': qa_result['raw_response'],  # Full Gemini output including chain of thought
+                    'CoT': qa_result['raw_response'],
                     'scenario': qa_result['scenario'],
                     'original_question': qa_result['question'],
                     'original_answer': qa_result['answer']
                 },
                 'token_usage': (qa_generator.total_tokens['total_tokens'] if qa_generator is not None else self.qa_generator.total_tokens['total_tokens']),
                 'review_result': {
-                    'review_checklist': parsed_result['review_checklist'],
-                    'refinement_rationale': parsed_result['refinement_rationale'],
-                    'distinction_notes': parsed_result['distinction_notes']
+                    'review_passed': review_passed,
+                    'review_attempts': review_attempts
                 },
-                # Refined MCQ fields
-                'question': parsed_result['refined_question'] if parsed_result['refined_question'] else qa_result['question'],
-                'answer': parsed_result['refined_options'] if parsed_result['refined_options'] else [qa_result['answer'], "Option B", "Option C", "Option D", "Option E"],
-                'correct': correct_index if correct_index is not None else 0
+                # MCQ fields
+                'question': qa_result['question'],
+                'answer': options,
+                'correct': correct_index
             }
             
             log_simple("VQA generation completed successfully")

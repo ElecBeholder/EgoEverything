@@ -29,7 +29,7 @@ python main.py \
     --dataset-path "$DATASET_PATH" \
     --json-path "$JSON_PATH" \
     --dataset-name "$DATASET_NAME" \
-    --limit 27:29 \
+    --limit 1:2 \
     --question-factor 1 \
     --sampling-density 5 \
     --n-llms 20 \

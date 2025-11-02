@@ -67,17 +67,57 @@ class QAReviewerRefiner:
                         "required": ["timestamp_second"]
                     }
                 }
+            },
+            {
+                "type": "function",
+                "function": {
+                    "name": "PROVIDE_FEEDBACK",
+                    "description": "Provide review feedback on the MCQ question to the generator. \
+                                    Use this tool to submit your review results after completing all verification. \
+                                    If ALL checklist items pass, set all_pass=True and leave feedback empty. \
+                                    If ANY checklist items fail, set all_pass=False and provide detailed feedback.",
+                    "parameters": {
+                        "type": "object",
+                        "properties": {
+                            "all_pass": {
+                                "type": "boolean",
+                                "description": "True if all checklist items passed, False otherwise"
+                            },
+                            "fact_verification": {
+                                "type": "string",
+                                "description": "Result of fact verification check: PASS/UNCERTAIN/FAIL with details"
+                            },
+                            "ambiguity_review": {
+                                "type": "string",
+                                "description": "Result of ambiguity review: PASS/FAIL with details"
+                            },
+                            "logic_chain": {
+                                "type": "string",
+                                "description": "Result of logic chain review: PASS/FAIL with details"
+                            },
+                            "wording": {
+                                "type": "string",
+                                "description": "Result of wording review: PASS/FAIL with details"
+                            },
+                            "modification_suggestions": {
+                                "type": "string",
+                                "description": "Specific suggestions for fixing identified issues (empty if all_pass=True)"
+                            }
+                        },
+                        "required": ["all_pass", "fact_verification", "ambiguity_review", "logic_chain", "wording"]
+                    }
+                }
             }
         ]
         
-        # System message with review checklist and refinement instructions
+        # System message with review checklist for feedback only
         system_message_text = """## Task Overview
-You are a VQA Quality Expert who reviews, rewrite, and converts QA pairs into multiple choice questions.
+You are a VQA Quality Expert who reviews multiple choice questions for accuracy and quality.
 
 ## Context You Will Receive
 1. **Question**: The generated question
-2. **Answer**: The generated answer
-3. **Evidence Image**: List of Image evidence
+2. **Answer Options**: Five multiple choice options (A-E) with the correct answer identified
+3. **Evidence Images**: List of Image evidence that supports the answer
 4. **Video Summary**: Action descriptions with timestamps
 
 ## Checklist
@@ -90,7 +130,7 @@ You are a VQA Quality Expert who reviews, rewrite, and converts QA pairs into mu
 2. **Object uniqueness**: Verify that object descriptions are unambiguous. You **MUST** check potential segments using tools to make sure no other objects match the same description
 
 ### 3. Logic Chain Review
-- Determine if the answer is the ONLY logical conclusion from the evidence
+- Determine if the correct answer is the ONLY logical conclusion from the evidence
 - You should imagine a contradictory conclusion that still fits the evidence - if this conclusion is reasonable, the logic is weak
 
 ### 4. Wording Review
@@ -100,58 +140,33 @@ You are a VQA Quality Expert who reviews, rewrite, and converts QA pairs into mu
 - **Personal pronouns**: Questions are asked by Camera Holder, So use "I" "my". Answers are given by another one, So use "you" "your".
 
 ## **Instructions**
-Step 1 Carefully review the QA and evidence Images
-Step 2 Use tools to gather additional information needed for Fact verification
+Step 1 Carefully review the Question, Answer Options and evidence Images
+Step 2 Use VERIFY_SEGMENT and VERIFY_FRAME tools to gather additional information needed for Fact verification
  • After each function response, briefly reflect on what you learned before deciding whether another call is necessary
  • Feel free to chain tool calls: study responses, think, then request another refinement until you find NEW evidence
 Step 3: Use tools to gather segment frames that may contain objects that match the same description
  • After each function response, briefly reflect on what you learned before deciding whether another call is necessary
  • Feel free to chain tool calls: study responses, think, then request another refinement until you all potential segments are checked
-Step 4: Based on the information you just collected, finish the checklist
-Step 5: Based on the knowledge you have, generate a BETTER question and answer that don't all issues identified in the checklist
-Step 6: Generate MCQ Options
-Create 4 incorrect options that are:
-- May share some elements with the correct answer
-- Have visually clear distinguishing details that make them wrong
-- Fit the scenario and action type
+Step 4: Based on the information you just collected, evaluate each checklist item
+Step 5: Call PROVIDE_FEEDBACK tool to submit your review results
+ • Set all_pass=True if ALL checklist items passed
+ • Set all_pass=False if ANY checklist items failed
+ • Provide detailed feedback for each checklist item
+ • Include modification suggestions if issues were found
 
-## Output Format
-After completing your review and refinement, provide output in this EXACT format:
-
-REVIEW_CHECKLIST:
-1. Fact Verification: [PASS/Uncertain/FAIL with specific issues]
-2. Ambiguity Review: [PASS/FAIL with specific issues]
-3. Logic Chain: [PASS/FAIL with An imagined contradictory conclusion, and whether it's reasonable]
-4. Wording: [PASS/FAIL with specific issues]
-
-REFINEMENT_RATIONALE:
-[Explain what changes you made to solve issues. List in order of checklist]
-
-REFINED_QUESTION:
-[New question]
-
-REFINED_OPTIONS:
-A. [Option A]
-B. [Option B]
-C. [Option C]
-D. [Option D]
-E. [Option E]
-
-CORRECT_ANSWER: [A/B/C/D/E]
-
-DISTINCTION_NOTES:
-[Brief explanation of what makes wrong answers incorrect]
+## Tool Usage
+- **VERIFY_SEGMENT**: Get multiple frames from a time range to verify actions/events
+- **VERIFY_FRAME**: Get a single frame at a specific timestamp to verify objects/details
+- **PROVIDE_FEEDBACK**: Submit your review results (REQUIRED after completing review)
 
 ## Critical Requirements
 - **YOU MUST** strictly follow the Instructions
 - **YOU MUST** reflect on what you learned for each tools calling
-- **YOU MUST** use tools to get NEW EVIDENCE for Item identity and Ambiguity review
+- **YOU MUST** use VERIFY tools to get NEW EVIDENCE for fact verification and ambiguity review
+- **YOU MUST** call PROVIDE_FEEDBACK tool with your review results - do NOT provide text output
 - Only one tool calling is sent each time
 - **Be critical** and try to find errors that do not meet the checklist
-- Be specific about visual details observed
-- Ensure MCQ options are challenging but fair
-- Use First-person pronouns for Question, second-person for Answer.
-- Focus on creating natural, recall memory-like questions"""
+- Be specific about visual details observed"""
         
         # Return system message with caching
         system_message = {
@@ -167,24 +182,40 @@ DISTINCTION_NOTES:
         
         return tools, system_message
     
-    def create_review_message(self, question: str, answer: str, 
+    def create_review_message(self, question: str, answer: str,
                              evidence_images: List[Dict[str, Any]],
-                             video_summary: str) -> List[Dict[str, Any]]:
-        """Create message for review and refinement with evidence images"""
-        
-        # Format evidence description
+                             video_summary: str, options: List[str] = None,
+                             correct_answer: str = None) -> List[Dict[str, Any]]:
+        """Create message for review with evidence images - supports both simple Q&A and MCQ"""
+
+        # Format evidence description - no timestamps
         evidence_text = "Evidence Images Provided:\n"
         for i, img in enumerate(evidence_images, 1):
-            if img['type'] == 'frame':
-                evidence_text += f"{i}. Frame at {img['timestamp']}s\n"
-            else:  # segment
-                evidence_text += f"{i}. Frame from segment {img['segment_range']} (at {img['timestamp']}s)\n"
-        
-        combined_text = f"""Please review and refine this QA pair:
+            evidence_text += f"{i}. Evidence Frame {i}\n"
 
-**QUESTION**: {question}
+        # Format the question and answer section based on whether it's MCQ or simple Q&A
+        if options and len(options) == 5 and correct_answer:
+            # MCQ format
+            options_text = ""
+            for i, option in enumerate(options):
+                letter = chr(65 + i)  # A, B, C, D, E
+                marker = " ← CORRECT" if letter == correct_answer.upper() else ""
+                options_text += f"{letter}. {option}{marker}\n"
 
-**ANSWER**: {answer}
+            qa_section = f"""**QUESTION**: {question}
+
+**ANSWER OPTIONS**:
+{options_text}
+**CORRECT ANSWER**: {correct_answer}"""
+        else:
+            # Simple Q&A format (fallback)
+            qa_section = f"""**QUESTION**: {question}
+
+**ANSWER**: {answer}"""
+
+        combined_text = f"""Please review this multiple choice question for quality and accuracy:
+
+{qa_section}
 
 **EVIDENCE PROVIDED**:
 {evidence_text}
@@ -350,12 +381,25 @@ DISTINCTION_NOTES:
         
         return response
     
-    def review_and_refine(self, question: str, answer: str, 
+    def review_and_refine(self, question: str, answer: str,
                          evidence_images: List[Dict[str, Any]],
-                         video_path: str, video_summary: str, 
-                         temp_dir: str) -> Dict[str, Any]:
-        """Review QA and refine to MCQ with evidence images"""
-        log_message("Starting QA review and MCQ refinement with evidence images")
+                         video_path: str, video_summary: str,
+                         temp_dir: str, options: List[str] = None,
+                         correct_answer: str = None) -> Dict[str, Any]:
+        """Review MCQ for quality and provide feedback - no refinement, just evaluation"""
+        if options and len(options) == 5:
+            log_message("Starting MCQ review for quality evaluation")
+            if is_verbose():
+                print("\n🔍 STARTING MCQ QUALITY REVIEW")
+                print("="*60)
+                print("📋 REVIEW CONTEXT:")
+                print(f"   • Question: {question}")
+                print(f"   • Options: {len(options)} choices provided")
+                print(f"   • Correct Answer: {correct_answer}")
+                print(f"   • Evidence images: {len(evidence_images)} images")
+                print()
+        else:
+            log_message("Starting simple QA review and MCQ refinement with evidence images")
         
         # Setup tools and system message
         tools, system_message = self.setup_tools_and_system_message()
@@ -363,18 +407,20 @@ DISTINCTION_NOTES:
         # Create messages
         messages = [system_message]
         messages.extend(self.create_review_message(
-            question, answer, evidence_images, video_summary
+            question, answer, evidence_images, video_summary, options, correct_answer
         ))
         
-        if is_verbose():
-            print("\n" + "🔍 STARTING QA REVIEW & REFINEMENT" + "\n")
-            print("📝 CONTEXT:")
-            print(f"   • Question: {question}")
-            print(f"   • Answer: {answer}")
-            print(f"   • Evidence images: {len(evidence_images)} images provided")
-            print()
-        else:
-            log_message(f"Reviewing QA: '{question}' -> '{answer}'")
+        # Verbose output handled above for MCQ, here handle simple Q&A case
+        if not (options and len(options) == 5):
+            if is_verbose():
+                print("\n" + "🔍 STARTING QA REVIEW & REFINEMENT" + "\n")
+                print("📝 CONTEXT:")
+                print(f"   • Question: {question}")
+                print(f"   • Answer: {answer}")
+                print(f"   • Evidence images: {len(evidence_images)} images provided")
+                print()
+            else:
+                log_message(f"Reviewing QA: '{question}' -> '{answer}'")
         
         log_simple("Making initial review API call")
         response = self.make_api_call(messages, tools)
@@ -450,11 +496,18 @@ DISTINCTION_NOTES:
             response = self.make_api_call(messages, tools)
         
         # Get final result
-        if is_verbose():
-            print("\n🎯 EXTRACTING REVIEW & REFINEMENT RESULT")
-            print("=" * 50)
+        if options and len(options) == 5:
+            if is_verbose():
+                print("\n🎯 EXTRACTING REVIEW FEEDBACK")
+                print("=" * 50)
+            else:
+                log_message("Finalizing MCQ review feedback")
         else:
-            log_message("Finalizing review and refinement")
+            if is_verbose():
+                print("\n🎯 EXTRACTING REVIEW & REFINEMENT RESULT")
+                print("=" * 50)
+            else:
+                log_message("Finalizing review and refinement")
         
         final_result = safe_get_response_content(response)
         
@@ -485,13 +538,29 @@ DISTINCTION_NOTES:
                        f"{self.cache_stats['cached_tokens']} tokens cached, "
                        f"${self.cache_stats['cache_discount']:.4f} total discount")
         
-        # Parse the review and refinement
-        parsed_result = self.parse_review_response(final_result)
-        
+        # Parse the response based on mode
+        if options and len(options) == 5:
+            # MCQ review mode - parse feedback
+            # Check if response ends with "pass" (handle cases where LLM adds reasoning before final answer)
+            if final_result.strip().lower().endswith("pass"):
+                parsed_result = {"status": "pass", "feedback": None}
+                success = True
+                if is_verbose():
+                    print("🎉 DETECTED 'pass' at end of response - MCQ approved!")
+                    if final_result.strip().lower() != "pass":
+                        print("⚠️  NOTE: Response contained extra text before 'pass' - will improve prompt")
+            else:
+                parsed_result = self.parse_feedback_response(final_result)
+                success = parsed_result.get('status') == 'feedback_provided'
+        else:
+            # Traditional refinement mode
+            parsed_result = self.parse_review_response(final_result)
+            success = bool(parsed_result.get('refined_question'))
+
         return {
             'raw_response': final_result,
             'parsed_result': parsed_result,
-            'success': bool(parsed_result.get('refined_question'))
+            'success': success
         }
     
     def parse_review_response(self, response: str) -> Dict[str, Any]:
@@ -583,6 +652,66 @@ DISTINCTION_NOTES:
                 'refined_options': [],
                 'correct_answer': '',
                 'distinction_notes': 'Parsing failed'
+            }
+
+    def parse_feedback_response(self, response: str) -> Dict[str, Any]:
+        """Parse the review feedback response"""
+        try:
+            log_message("Parsing review feedback response")
+
+            parsed = {
+                'status': 'feedback_provided',
+                'review_feedback': {},
+                'modification_suggestions': '',
+                'evidence_found': ''
+            }
+
+            # Parse review feedback section
+            feedback_pattern = r'REVIEW_FEEDBACK:(.*?)(?=MODIFICATION_SUGGESTIONS:|$)'
+            feedback_match = re.search(feedback_pattern, response, re.DOTALL | re.IGNORECASE)
+            if feedback_match:
+                feedback_text = feedback_match.group(1)
+                # Parse individual feedback items
+                fact_match = re.search(r'1\.\s*Fact Verification:\s*([^\\n]+)', feedback_text)
+                ambiguity_match = re.search(r'2\.\s*Ambiguity Review:\s*([^\\n]+)', feedback_text)
+                logic_match = re.search(r'3\.\s*Logic Chain:\s*([^\\n]+)', feedback_text)
+                wording_match = re.search(r'4\.\s*Wording:\s*([^\\n]+)', feedback_text)
+
+                if fact_match:
+                    parsed['review_feedback']['fact_verification'] = fact_match.group(1).strip()
+                if ambiguity_match:
+                    parsed['review_feedback']['ambiguity_review'] = ambiguity_match.group(1).strip()
+                if logic_match:
+                    parsed['review_feedback']['logic_chain'] = logic_match.group(1).strip()
+                if wording_match:
+                    parsed['review_feedback']['wording'] = wording_match.group(1).strip()
+
+            # Parse modification suggestions
+            suggestions_match = re.search(
+                r'MODIFICATION_SUGGESTIONS:\\s*\\n?(.*?)(?=\\n\\s*EVIDENCE_FOUND:|$)',
+                response, re.DOTALL | re.IGNORECASE
+            )
+            if suggestions_match:
+                parsed['modification_suggestions'] = suggestions_match.group(1).strip()
+
+            # Parse evidence found
+            evidence_match = re.search(
+                r'EVIDENCE_FOUND:\\s*\\n?(.*?)(?=\\n|$)',
+                response, re.DOTALL | re.IGNORECASE
+            )
+            if evidence_match:
+                parsed['evidence_found'] = evidence_match.group(1).strip()
+
+            log_message("✅ Feedback parsing successful")
+            return parsed
+
+        except Exception as e:
+            log_message(f"Feedback parsing failed: {str(e)}")
+            return {
+                'status': 'parsing_failed',
+                'review_feedback': {},
+                'modification_suggestions': 'Parsing failed',
+                'evidence_found': 'Parsing failed'
             }
     
     def _parse_text_function_calls(self, response_content: str) -> List[Dict[str, Any]]:
