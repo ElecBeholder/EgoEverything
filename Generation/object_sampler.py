@@ -23,28 +23,30 @@ import random
 from tqdm import tqdm
 
 try:
-    from .utils import log_message, encode_image_to_base64, create_temp_dir, cleanup_temp_files
+    from .utils import log_message, encode_image_to_base64, create_temp_dir, cleanup_temp_files, get_default_vlm_model
     from .object_detector import ObjectDetector
 except ImportError:
     import sys
     sys.path.append(os.path.dirname(__file__))
-    from utils import log_message, encode_image_to_base64, create_temp_dir, cleanup_temp_files
+    from utils import log_message, encode_image_to_base64, create_temp_dir, cleanup_temp_files, get_default_vlm_model
     from object_detector import ObjectDetector
 
 
 class ObjectSampler:
     """Object detection and gaze-based sampling"""
     
-    def __init__(self, api_key: str, device: str = None, n_llms: int = 5):
+    def __init__(self, api_key: str, device: str = None, n_llms: int = 5, vlm_model: str = None):
         """
         Initialize object sampler
         
         Args:
-            api_key: OpenRouter API key for Gemini
+            api_key: OpenRouter API key for VLM
             device: Device for CLIP inference ('cuda' or 'cpu')
-            n_llms: Number of parallel Gemini API threads for object detection
+            n_llms: Number of parallel VLM API threads for object detection
+            vlm_model: VLM model name
         """
         self.api_key = api_key
+        self.vlm_model = vlm_model or get_default_vlm_model()
         self.device = device if device else ('cuda' if torch.cuda.is_available() else 'cpu')
         self.n_llms = n_llms
         
@@ -229,8 +231,8 @@ class ObjectSampler:
     
     def detection_worker(self, work_queue: queue.Queue, results_queue: queue.Queue, 
                         progress_lock: threading.Lock, pbar: tqdm, worker_id: int) -> None:
-        """Worker thread for object detection using Gemini"""
-        object_detector = ObjectDetector(self.api_key)
+        """Worker thread for object detection using VLM"""
+        object_detector = ObjectDetector(self.api_key, vlm_model=self.vlm_model)
         
         while True:
             try:
@@ -278,7 +280,7 @@ class ObjectSampler:
                 break
 
     def batch_detect_objects_multithreaded(self, keyframes: List[Dict[str, Any]], pbar: tqdm, progress_lock: threading.Lock) -> List[Dict[str, Any]]:
-        """Detect objects in all keyframes using multiple Gemini threads"""
+        """Detect objects in all keyframes using multiple VLM threads"""
         work_queue = queue.Queue()
         results_queue = queue.Queue()
         
@@ -326,6 +328,7 @@ class ObjectSampler:
                 detected_objects = result['detected_objects']
                 
                 for obj in detected_objects:
+                    normalized_bbox_1000 = obj.get('normalized_bbox_1000', obj.get('gemini_bbox'))
                     obj_with_frame = {
                         'object_index': len(all_objects),
                         'frame_index': frame_info['frame_index'],
@@ -334,7 +337,7 @@ class ObjectSampler:
                         'object_name': obj['name'],
                         'bbox': obj['bbox'],
                         'normalized_bbox': obj.get('normalized_bbox', obj['bbox']),
-                        'gemini_bbox': obj.get('gemini_bbox', obj['bbox']),
+                        'normalized_bbox_1000': normalized_bbox_1000,
                         'image_width': frame_info['image_width'],
                         'image_height': frame_info['image_height']
                     }
@@ -632,6 +635,7 @@ def main():
     """Main function"""
     parser = argparse.ArgumentParser(description='Object Sampler with Gaze-based Selection')
     parser.add_argument('--api-key', required=True, help='OpenRouter API key')
+    parser.add_argument('--vlm-model', default=None, help='VLM model name (default: VLM_MODEL environment variable)')
     parser.add_argument('--video-path', required=True, help='Path to video file')
     parser.add_argument('--questions-per-minute', type=float, default=1.0,
                        help='Questions per minute (determines keyframe sampling)')
@@ -646,7 +650,7 @@ def main():
     parser.add_argument('--device', default='cuda',
                        help='Device for CLIP inference (cuda/cpu)')
     parser.add_argument('--n-llms', type=int, default=20,
-                       help='Number of parallel Gemini API threads (default: 5)')
+                       help='Number of parallel VLM API threads (default: 5)')
     parser.add_argument('--gaze-csv', default=None,
                        help='Optional gaze tracking CSV file for key object sampling')
     parser.add_argument('--num-key-objects', type=int, default=5,
@@ -673,7 +677,7 @@ def main():
                 print(f"Gaze CSV file not found: {args.gaze_csv}")
         
         # Initialize sampler
-        sampler = ObjectSampler(args.api_key, args.device, args.n_llms)
+        sampler = ObjectSampler(args.api_key, args.device, args.n_llms, vlm_model=args.vlm_model)
         
         # Process video
         results = sampler.process_video(

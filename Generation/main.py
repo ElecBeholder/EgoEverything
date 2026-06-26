@@ -11,7 +11,7 @@ from typing import List, Dict, Any, Optional, Tuple
 try:
     from .utils import (
         log_message, log_simple, set_log_verbose, load_video_sequences, save_final_result, 
-        cleanup_temp_files, create_temp_dir, get_video_duration_minutes
+        cleanup_temp_files, create_temp_dir, get_video_duration_minutes, get_default_vlm_model
     )
     from .video_loader import VideoLoader
     from .object_detector import ObjectDetector
@@ -24,7 +24,7 @@ except ImportError:
     sys.path.append(os.path.dirname(__file__))
     from utils import (
         log_message, log_simple, set_log_verbose, load_video_sequences, save_final_result, 
-        cleanup_temp_files, create_temp_dir, get_video_duration_minutes
+        cleanup_temp_files, create_temp_dir, get_video_duration_minutes, get_default_vlm_model
     )
     from video_loader import VideoLoader
     from object_detector import ObjectDetector
@@ -37,17 +37,18 @@ except ImportError:
 class VQAGenerationPipeline:
     """Main VQA generation pipeline"""
     
-    def __init__(self, api_key: str, dataset_path: str, temp_base_dir: str = "tmp"):
+    def __init__(self, api_key: str, dataset_path: str, temp_base_dir: str = "tmp", vlm_model: str = None):
         self.api_key = api_key
+        self.vlm_model = vlm_model or get_default_vlm_model()
         self.dataset_path = dataset_path
         self.temp_base_dir = temp_base_dir
         
         # Initialize components
         self.video_loader = VideoLoader(dataset_path)
-        self.object_detector = ObjectDetector(api_key)
-        self.qa_generator = QAGenerator(api_key)
-        self.qa_reviewer = QAReviewerRefiner(api_key)
-        self.object_sampler = ObjectSampler(api_key)
+        self.object_detector = ObjectDetector(api_key, vlm_model=self.vlm_model)
+        self.qa_generator = QAGenerator(api_key, vlm_model=self.vlm_model)
+        self.qa_reviewer = QAReviewerRefiner(api_key, vlm_model=self.vlm_model)
+        self.object_sampler = ObjectSampler(api_key, vlm_model=self.vlm_model)
         self.sampling_density = 60.0
         self.qa_n_llms = 30
         
@@ -99,18 +100,20 @@ class VQAGenerationPipeline:
                 sampled = sampler_results['key_objects'][0]
                 timestamp = sampled['keyframe']['timestamp']
                 keyframe_path = sampled['keyframe']['frame_path']
-                # Ensure bbox passed to QA is STRICTLY Gemini-format; fallback by converting
+                # Ensure bbox passed to QA is normalized [ymin,xmin,ymax,xmax] 0-1000; fallback by converting.
                 instance = sampled['instance']
-                if 'gemini_bbox' in instance and instance['gemini_bbox'] is not None:
-                    gemini_bbox = instance['gemini_bbox']
+                if 'normalized_bbox_1000' in instance and instance['normalized_bbox_1000'] is not None:
+                    normalized_bbox_1000 = instance['normalized_bbox_1000']
+                elif 'gemini_bbox' in instance and instance['gemini_bbox'] is not None:
+                    normalized_bbox_1000 = instance['gemini_bbox']
                 elif 'normalized_bbox' in instance and instance['normalized_bbox'] is not None:
                     x0, y0, x1, y1 = instance['normalized_bbox']
-                    gemini_bbox = [y0, x0, y1, x1]
+                    normalized_bbox_1000 = [y0, x0, y1, x1]
                 else:
                     x0, y0, x1, y1 = instance['bbox']
                     img_w = instance.get('image_width', 1) or 1
                     img_h = instance.get('image_height', 1) or 1
-                    gemini_bbox = [
+                    normalized_bbox_1000 = [
                         int(y0 / img_h * 1000),
                         int(x0 / img_w * 1000),
                         int(y1 / img_h * 1000),
@@ -118,7 +121,7 @@ class VQAGenerationPipeline:
                     ]
                 selected_object = {
                     'name': instance['object_name'],
-                    'gemini_bbox': gemini_bbox,            # [ymin,xmin,ymax,xmax] in 0-1000
+                    'normalized_bbox_1000': normalized_bbox_1000,
                     'bbox': instance.get('bbox')            # pixel coords [x0,y0,x1,y1] on keyframe
                 }
                 log_simple(f"Sampled keyframe {timestamp:.1f}s and object {selected_object['name']}")
@@ -248,7 +251,7 @@ class VQAGenerationPipeline:
             unique_ids = sampler_results['summary']['unique_objects'] if sampler_results else 0
             log_simple(f"Generating {num_questions} questions for {sequence_id} (factor {question_factor} * unique_objects={unique_ids})")
             
-            # Generate multiple VQAs for this video using multiple Gemini threads
+            # Generate multiple VQAs for this video using multiple VLM threads
             import threading, queue
             work_queue = queue.Queue()
             result_queue = queue.Queue()
@@ -258,17 +261,19 @@ class VQAGenerationPipeline:
             for q in range(num_questions):
                 sample = key_objects[q]
                 instance = sample['instance']
-                # Build Gemini-format bbox strictly for batch generation
-                if 'gemini_bbox' in instance and instance['gemini_bbox'] is not None:
-                    gemini_bbox = instance['gemini_bbox']
+                # Build normalized [ymin,xmin,ymax,xmax] 0-1000 bbox for batch generation.
+                if 'normalized_bbox_1000' in instance and instance['normalized_bbox_1000'] is not None:
+                    normalized_bbox_1000 = instance['normalized_bbox_1000']
+                elif 'gemini_bbox' in instance and instance['gemini_bbox'] is not None:
+                    normalized_bbox_1000 = instance['gemini_bbox']
                 elif 'normalized_bbox' in instance and instance['normalized_bbox'] is not None:
                     x0, y0, x1, y1 = instance['normalized_bbox']
-                    gemini_bbox = [y0, x0, y1, x1]
+                    normalized_bbox_1000 = [y0, x0, y1, x1]
                 else:
                     x0, y0, x1, y1 = instance['bbox']
                     img_w = instance.get('image_width', 1) or 1
                     img_h = instance.get('image_height', 1) or 1
-                    gemini_bbox = [
+                    normalized_bbox_1000 = [
                         int(y0 / img_h * 1000),
                         int(x0 / img_w * 1000),
                         int(y1 / img_h * 1000),
@@ -279,7 +284,7 @@ class VQAGenerationPipeline:
                     'timestamp': sample['keyframe']['timestamp'],
                     'selected_object': {
                         'name': instance['object_name'],
-                        'gemini_bbox': gemini_bbox,       # [ymin,xmin,ymax,xmax] 0-1000
+                        'normalized_bbox_1000': normalized_bbox_1000,
                         'bbox': instance.get('bbox')       # pixel [x0,y0,x1,y1]
                     }
                 }
@@ -291,8 +296,8 @@ class VQAGenerationPipeline:
 
             def qa_consumer_thread(thread_id: int):
                 # Each thread should have its own generator/reviewer (separate conversations)
-                local_qa = QAGenerator(self.api_key)
-                local_reviewer = QAReviewerRefiner(self.api_key)
+                local_qa = QAGenerator(self.api_key, vlm_model=self.vlm_model)
+                local_reviewer = QAReviewerRefiner(self.api_key, vlm_model=self.vlm_model)
                 local_results = []
                 while True:
                     item = work_queue.get()
@@ -396,6 +401,7 @@ def main():
     """Main entry point"""
     parser = argparse.ArgumentParser(description='VQA Generation Pipeline')
     parser.add_argument('--api-key', required=True, help='OpenRouter API key')
+    parser.add_argument('--vlm-model', default=None, help='VLM model name (default: VLM_MODEL environment variable)')
     parser.add_argument('--dataset-path', required=True, help='Dataset directory path')
     parser.add_argument('--json-path', required=True, help='Dataset JSON file path')
     parser.add_argument('--dataset-name', required=True, help='Dataset name for output file')
@@ -409,9 +415,9 @@ def main():
     parser.add_argument('--temp-dir', default='tmp',
                        help='Temporary directory for processing (default: tmp)')
     parser.add_argument('--n-llms', type=int, default=5,
-                        help='Number of parallel Gemini API threads for object detection (default: 5)')
+                        help='Number of parallel VLM API threads for object detection (default: 5)')
     parser.add_argument('--qa-n-llms', type=int, default=30,
-                        help='Number of parallel Gemini API threads for QA generation (default: 30)')
+                        help='Number of parallel VLM API threads for QA generation (default: 30)')
     parser.add_argument('--verbose', action='store_true', default=False,
                         help='Enable detailed logging output (default: simple logging)')
     
@@ -463,7 +469,8 @@ def main():
     pipeline = VQAGenerationPipeline(
         api_key=args.api_key,
         dataset_path=args.dataset_path,
-        temp_base_dir=args.temp_dir
+        temp_base_dir=args.temp_dir,
+        vlm_model=args.vlm_model
     )
     # Propagate sampling density to pipeline
     pipeline.sampling_density = args.sampling_density
@@ -490,6 +497,7 @@ def test_single_video():
     """Test pipeline on a single video"""
     parser = argparse.ArgumentParser(description='Test VQA Generation on Single Video')
     parser.add_argument('--api-key', required=True, help='OpenRouter API key')
+    parser.add_argument('--vlm-model', default=None, help='VLM model name (default: VLM_MODEL environment variable)')
     parser.add_argument('--video-path', required=True, help='Single video file path')
     parser.add_argument('--sequence-id', required=True, help='Video sequence ID')
     parser.add_argument('--dataset-name', default='test_dataset', help='Dataset name for output')
@@ -509,7 +517,8 @@ def test_single_video():
     pipeline = VQAGenerationPipeline(
         api_key=args.api_key,
         dataset_path=dataset_path,
-        temp_base_dir=args.temp_dir
+        temp_base_dir=args.temp_dir,
+        vlm_model=args.vlm_model
     )
     
     try:

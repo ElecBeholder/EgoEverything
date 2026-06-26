@@ -9,20 +9,22 @@ import os
 from typing import List, Dict, Any, Optional, Tuple
 from openai import OpenAI
 try:
-    from .utils import log_message, log_simple, encode_image_to_base64, safe_get_response_content, safe_get_token_usage, is_verbose
+    from .utils import log_message, log_simple, encode_image_to_base64, safe_get_response_content, safe_get_token_usage, is_verbose, get_default_vlm_model
     from .frame_extractor import FrameExtractor, SegmentFeatureExtractor
 except ImportError:
     import sys
     import os
     sys.path.append(os.path.dirname(__file__))
-    from utils import log_message, log_simple, encode_image_to_base64, safe_get_response_content, safe_get_token_usage, is_verbose
+    from utils import log_message, log_simple, encode_image_to_base64, safe_get_response_content, safe_get_token_usage, is_verbose, get_default_vlm_model
     from frame_extractor import FrameExtractor, SegmentFeatureExtractor
 
 
 class QAGenerator:
     """Generates question-answer pairs using LLM with tool calling"""
     
-    def __init__(self, api_key: str):
+    def __init__(self, api_key: str, vlm_model: str = None):
+        self.api_key = api_key
+        self.vlm_model = vlm_model or get_default_vlm_model()
         self.client = OpenAI(
             api_key=api_key,
             base_url="https://openrouter.ai/api/v1"
@@ -189,17 +191,22 @@ DO NOT provide any text output format - use ONLY the REQUEST_REVIEW tool call.
         # Format selected object info
         selected_object_info = ""
         if selected_object:
-            # Safely prefer gemini_bbox, then normalized, then pixel bbox
-            gemini_bbox = selected_object.get('gemini_bbox')
-            if gemini_bbox is None:
-                gemini_bbox = selected_object.get('normalized_bbox')
-            if gemini_bbox is None:
-                gemini_bbox = selected_object.get('bbox')
+            # Safely prefer normalized [ymin,xmin,ymax,xmax] 0-1000, then legacy/model-specific or pixel bbox.
+            normalized_bbox_1000 = selected_object.get('normalized_bbox_1000')
+            if normalized_bbox_1000 is None:
+                normalized_bbox_1000 = selected_object.get('gemini_bbox')
+            if normalized_bbox_1000 is None:
+                normalized_bbox = selected_object.get('normalized_bbox')
+                if normalized_bbox is not None:
+                    x0, y0, x1, y1 = normalized_bbox
+                    normalized_bbox_1000 = [y0, x0, y1, x1]
+            if normalized_bbox_1000 is None:
+                normalized_bbox_1000 = selected_object.get('bbox')
 
             selected_object_info = f"""
 Selected Object for Question Focus:
 Object Name: {selected_object.get('name', 'unknown')}
-Object Bounding Box: {gemini_bbox} (format: [ymin, xmin, ymax, xmax], normalized 0-1000 if available)
+Object Bounding Box: {normalized_bbox_1000} (format: [ymin, xmin, ymax, xmax], normalized 0-1000 if available)
 """
         
         # Split content to enable caching for both keyframe and video_summary
@@ -209,7 +216,7 @@ This is a key frame sampled from video at {timestamp:.1f} seconds.
         
         base64_image = encode_image_to_base64(keyframe_path)
         
-        # Combine all content with single cache control at the end for OpenRouter Gemini
+        # Combine all content with single cache control at the end for the OpenRouter-compatible VLM.
         combined_text = f"{keyframe_prompt}\n\nHere is the Full segment list description:\n{video_summary}"
         
         return [
@@ -351,7 +358,7 @@ This is a key frame sampled from video at {timestamp:.1f} seconds.
                 log_message("Creating new reviewer session")
 
                 # Initialize reviewer
-                self.reviewer = QAReviewerRefiner(self.client.api_key)
+                self.reviewer = QAReviewerRefiner(self.api_key, vlm_model=self.vlm_model)
 
                 # Extract evidence images
                 evidence_images = []
@@ -489,7 +496,7 @@ Evidence Timestamps: {evidence_timestamps}"""
                             {'arguments': tool_call.function.arguments}, video_path, temp_dir
                         )
 
-                        # Add tool response with name field for Gemini
+                        # Add tool response with name field for VLM tool-calling compatibility.
                         self.reviewer_messages.append({
                             "role": "tool",
                             "name": "VERIFY_SEGMENT",
@@ -512,7 +519,7 @@ Evidence Timestamps: {evidence_timestamps}"""
                             {'arguments': tool_call.function.arguments}, video_path, temp_dir
                         )
 
-                        # Add tool response with name field for Gemini
+                        # Add tool response with name field for VLM tool-calling compatibility.
                         self.reviewer_messages.append({
                             "role": "tool",
                             "name": "VERIFY_FRAME",
@@ -806,7 +813,7 @@ Evidence Timestamps: {evidence_timestamps}"""
             print("="*80 + "\n")
 
         response = self.client.chat.completions.create(
-            model="google/gemini-2.5-flash",
+            model=self.vlm_model,
             messages=messages,
             tools=tools,
             tool_choice="auto",
@@ -1164,7 +1171,7 @@ Ensure the JSON is valid and follows the required structure."""
             json_schema = self.get_structured_qa_schema()
             
             response = self.client.chat.completions.create(
-                model="google/gemini-2.5-flash",
+                model=self.vlm_model,
                 messages=[
                     {
                         "role": "user",
@@ -1426,6 +1433,7 @@ def main():
     
     parser = argparse.ArgumentParser(description='Test QA generator')
     parser.add_argument('--api-key', required=True, help='OpenRouter API key')
+    parser.add_argument('--vlm-model', default=None, help='VLM model name (default: VLM_MODEL environment variable)')
     parser.add_argument('--video-path', required=True, help='Video file path')
     parser.add_argument('--keyframe-path', required=True, help='Key frame image path')
     parser.add_argument('--timestamp', type=float, required=True, help='Key frame timestamp')
@@ -1442,11 +1450,11 @@ def main():
         'name': 'laptop',
         'bbox': [100, 100, 300, 200],
         'normalized_bbox': [100, 100, 300, 200],
-        'gemini_bbox': [100, 100, 300, 200]
+        'normalized_bbox_1000': [100, 100, 300, 200]
     }
     
     # Test QA generation
-    generator = QAGenerator(args.api_key)
+    generator = QAGenerator(args.api_key, vlm_model=args.vlm_model)
     
     try:
         result = generator.generate_qa(

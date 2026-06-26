@@ -9,20 +9,21 @@ import os
 from typing import List, Dict, Any, Optional, Tuple
 from openai import OpenAI
 try:
-    from .utils import log_message, log_simple, encode_image_to_base64, safe_get_response_content, safe_get_token_usage, is_verbose
+    from .utils import log_message, log_simple, encode_image_to_base64, safe_get_response_content, safe_get_token_usage, is_verbose, get_default_vlm_model
     from .frame_extractor import FrameExtractor, SegmentFeatureExtractor
 except ImportError:
     import sys
     import os
     sys.path.append(os.path.dirname(__file__))
-    from utils import log_message, log_simple, encode_image_to_base64, safe_get_response_content, safe_get_token_usage, is_verbose
+    from utils import log_message, log_simple, encode_image_to_base64, safe_get_response_content, safe_get_token_usage, is_verbose, get_default_vlm_model
     from frame_extractor import FrameExtractor, SegmentFeatureExtractor
 
 
 class QAReviewerRefiner:
     """Reviews and refines question-answer pairs with MCQ conversion"""
     
-    def __init__(self, api_key: str):
+    def __init__(self, api_key: str, vlm_model: str = None):
+        self.vlm_model = vlm_model or get_default_vlm_model()
         self.client = OpenAI(
             api_key=api_key,
             base_url="https://openrouter.ai/api/v1"
@@ -363,7 +364,7 @@ Step 5: Call PROVIDE_FEEDBACK tool to submit your review results
             print("="*80 + "\n")
 
         response = self.client.chat.completions.create(
-            model="google/gemini-2.5-flash",
+            model=self.vlm_model,
             messages=messages,
             tools=tools,
             tool_choice="auto",
@@ -828,6 +829,7 @@ def main():
     
     parser = argparse.ArgumentParser(description='Test QA reviewer and refiner')
     parser.add_argument('--api-key', required=True, help='OpenRouter API key')
+    parser.add_argument('--vlm-model', default=None, help='VLM model name (default: VLM_MODEL environment variable)')
     parser.add_argument('--video-path', required=True, help='Video file path')
     parser.add_argument('--question', required=True, help='Test question')
     parser.add_argument('--answer', required=True, help='Test answer')
@@ -846,7 +848,7 @@ def main():
     mock_summary = "0.0s-30.0s: Person working at desk\n30.0s-60.0s: Person reading book"
     
     # Test review and refinement
-    reviewer = QAReviewerRefiner(args.api_key)
+    reviewer = QAReviewerRefiner(args.api_key, vlm_model=args.vlm_model)
     
     try:
         result = reviewer.review_and_refine(

@@ -20,7 +20,7 @@ This is a modular Video Question Answering (VQA) generation system that processe
 │   └── 加载眼动数据 (_tracking.csv, 可选)
 ├── 2. 对象采样预处理 (ObjectSampler)
 │   ├── 提取关键帧 (sampling_density控制, 默认60帧/秒)
-│   ├── 多线程对象检测 (Gemini API, n_llms线程)
+│   ├── 多线程对象检测 (VLM API, n_llms线程)
 │   ├── CLIP特征聚类合并相似对象
 │   └── 基于眼动数据选择关键对象 (question_factor倍数)
 ├── 3. 并行QA生成 (多线程)
@@ -42,11 +42,11 @@ keyframes = extract_keyframes_uniform(video_path, num_frames, temp_dir)
 
 #### 2.2 对象检测 (多线程)
 ```python
-# 多线程调用Gemini API进行对象检测
+# 多线程调用VLM API进行对象检测
 for keyframe in keyframes:
-    # Gemini 2.5 Flash检测对象并返回边界框坐标
+    # VLM检测对象并返回边界框坐标
     detected_objects = object_detector.detect(keyframe)
-    # 返回格式: {object_name, bbox, confidence, gemini_bbox}
+    # 返回格式: {object_name, bbox, confidence, normalized_bbox_1000}
 ```
 
 #### 2.3 对象聚类合并
@@ -77,7 +77,7 @@ selected_object_ids = random.choice(object_ids, p=probabilities, size=question_f
 ### 3. QA生成详细逻辑 (QAGenerator)
 
 #### 3.1 工具调用系统
-QA生成器配备两个工具供Gemini使用：
+QA生成器配备两个工具供VLM使用：
 
 ```python
 tools = [
@@ -88,7 +88,7 @@ tools = [
 
 #### 3.2 生成流程
 ```python
-# 系统提示要求Gemini扮演AR/VR用户
+# 系统提示要求VLM扮演AR/VR用户
 system_prompt = """
 想象你是AR/VR设备用户，需要：
 1. 分析视频片段和关键帧
@@ -107,11 +107,11 @@ context = {
     }
 }
 
-# Gemini使用工具进行多轮推理
+# VLM使用工具进行多轮推理
 conversation = [
     {"role": "system", "content": system_prompt},
     {"role": "user", "content": context},
-    # Gemini可能调用REFINE_SEGMENT/REFINE_FRAME获取更多信息
+    # VLM可能调用REFINE_SEGMENT/REFINE_FRAME获取更多信息
     # 最终输出: Scenario + Question + Answer
 ]
 ```
@@ -129,7 +129,7 @@ schema = {
     "original_answer": "原始答案"
 }
 
-response = gemini_api.call(
+response = vlm_api.call(
     messages=[{"role": "user", "content": qa_response}],
     response_format={"type": "json_object", "schema": schema}
 )
@@ -139,7 +139,7 @@ response = gemini_api.call(
 
 #### 5.1 对象检测线程池
 ```python
-# 默认5个线程并行调用Gemini进行对象检测
+# 默认5个线程并行调用VLM进行对象检测
 n_llms = 5
 with ThreadPoolExecutor(max_workers=n_llms) as executor:
     futures = [executor.submit(detect_objects, frame) for frame in keyframes]
@@ -185,7 +185,7 @@ for thread_id in range(qa_n_llms):
           "key_object": {"name": "coffee_mug", "bbox": [100,150,200,250]},
           "raw_output": {
             "raw_qa": "Where did I place the coffee mug? On the desk",
-            "CoT": "完整的Gemini推理过程",
+            "CoT": "完整的VLM推理过程",
             "scenario": "用户寻找咖啡杯的场景"
           },
           "token_usage": 2300,
@@ -205,6 +205,7 @@ for thread_id in range(qa_n_llms):
 ```bash
 python main.py \
     --api-key "your-openrouter-api-key" \
+    --vlm-model "$VLM_MODEL" \
     --dataset-path "/path/to/dataset" \
     --json-path "/path/to/dataset.json" \
     --dataset-name "AriaEveryday_Activities" \
@@ -218,14 +219,15 @@ python main.py \
 ```bash
 python main.py test \
     --api-key "your-api-key" \
+    --vlm-model "$VLM_MODEL" \
     --video-path "/path/to/video.mp4" \
     --sequence-id "video_id"
 ```
 
 ### Individual Module Testing
-- `python object_detector.py --api-key "key" --image-path "/path" --visualize`
-- `python object_sampler.py --video-path "/path" --api-key "key" --num-samples 5`
-- `python qa_generator.py --api-key "key" --video-path "/path" --timestamp 30.0`
+- `python object_detector.py --api-key "key" --vlm-model "$VLM_MODEL" --image-path "/path" --visualize`
+- `python object_sampler.py --video-path "/path" --api-key "key" --vlm-model "$VLM_MODEL" --num-key-objects 5`
+- `python qa_generator.py --api-key "key" --vlm-model "$VLM_MODEL" --video-path "/path" --timestamp 30.0`
 
 ### Dependencies Installation
 ```bash
@@ -240,5 +242,5 @@ brew install ffmpeg      # macOS
 - **object_sampler.py**: `ObjectSampler` - 核心采样逻辑，CLIP聚类+眼动选择  
 - **qa_generator.py**: `QAGenerator` - 工具调用式QA生成
 - **mcq_refiner.py**: `MCQRefiner` - 结构化MCQ输出
-- **object_detector.py**: `ObjectDetector` - Gemini对象检测
+- **object_detector.py**: `ObjectDetector` - VLM对象检测
 - **utils.py**: 公共工具函数和文件处理

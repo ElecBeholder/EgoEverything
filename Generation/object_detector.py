@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Object detection using Gemini API
+Object detection using VLM API
 """
 import re
 import cv2
@@ -9,26 +9,27 @@ from PIL import Image
 from typing import List, Dict, Any
 from openai import OpenAI
 try:
-    from .utils import log_message, encode_image_to_base64, safe_get_response_content
+    from .utils import log_message, encode_image_to_base64, safe_get_response_content, get_default_vlm_model
 except ImportError:
     import sys
     import os
     sys.path.append(os.path.dirname(__file__))
-    from utils import log_message, encode_image_to_base64, safe_get_response_content
+    from utils import log_message, encode_image_to_base64, safe_get_response_content, get_default_vlm_model
 
 
 class ObjectDetector:
-    """Object detection using Gemini API"""
+    """Object detection using VLM API"""
     
-    def __init__(self, api_key: str):
+    def __init__(self, api_key: str, vlm_model: str = None):
+        self.vlm_model = vlm_model or get_default_vlm_model()
         self.client = OpenAI(
             api_key=api_key,
             base_url="https://openrouter.ai/api/v1"
         )
     
     def detect_objects(self, image_path: str) -> str:
-        """Detect objects in image using Gemini"""
-        log_message("Starting object detection with Gemini")
+        """Detect objects in image using VLM"""
+        log_message("Starting object detection with VLM")
         
         base64_image = encode_image_to_base64(image_path)
         
@@ -59,7 +60,7 @@ Please analyze the image carefully and provide all clearly visible objects with 
 
         try:
             response = self.client.chat.completions.create(
-                model="google/gemini-2.5-flash",
+                model=self.vlm_model,
                 messages=[
                     {
                         "role": "user",
@@ -83,18 +84,18 @@ Please analyze the image carefully and provide all clearly visible objects with 
                 log_message("Object detection completed")
                 return response_text
             else:
-                raise Exception("Empty response from Gemini")
+                raise Exception("Empty response from VLM")
                 
         except Exception as e:
             log_message(f"Object detection failed: {str(e)}")
             raise Exception(f"Object detection failed: {str(e)}")
     
     def parse_detection_results(self, response_text: str, image_path: str, debug: bool = False) -> List[Dict[str, Any]]:
-        """Parse Gemini detection results into structured format"""
+        """Parse VLM detection results into structured format"""
         objects = []
         
         if debug:
-            log_message("=== DEBUG: Raw Gemini Response ===")
+            log_message("=== DEBUG: Raw VLM Response ===")
             print(response_text[:500] + "..." if len(response_text) > 500 else response_text)
             log_message("=== End Raw Response ===")
         
@@ -184,7 +185,7 @@ Please analyze the image carefully and provide all clearly visible objects with 
                     'name': object_name,
                     'bbox': pixel_bbox,  # [x0,y0,x1,y1] pixel coordinates
                     'normalized_bbox': normalized_bbox,  # [x0,y0,x1,y1] normalized
-                    'gemini_bbox': [ymin, xmin, ymax, xmax]  # Original Gemini format
+                    'normalized_bbox_1000': [ymin, xmin, ymax, xmax]  # [ymin,xmin,ymax,xmax], normalized 0-1000
                 })
                 
                 log_message(f"Parsed object: {object_name}")
@@ -263,6 +264,7 @@ def main():
     
     parser = argparse.ArgumentParser(description='Test object detector')
     parser.add_argument('--api-key', required=True, help='OpenRouter API key')
+    parser.add_argument('--vlm-model', default=None, help='VLM model name (default: VLM_MODEL environment variable)')
     parser.add_argument('--image-path', required=True, help='Image file path')
     parser.add_argument('--visualize', action='store_true', help='Create visualization')
     
@@ -273,7 +275,7 @@ def main():
         return
     
     # Test object detection
-    detector = ObjectDetector(args.api_key)
+    detector = ObjectDetector(args.api_key, vlm_model=args.vlm_model)
     
     try:
         # Detect objects

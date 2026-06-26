@@ -12,6 +12,14 @@ from typing import List, Dict, Any, Optional
 
 # Global log level control - default to simple logging
 _LOG_VERBOSE = False
+DEFAULT_VLM_MODEL_ENV = "VLM_MODEL"
+
+def get_default_vlm_model() -> str:
+    """Return the configured VLM model name from the environment."""
+    model_name = os.environ.get(DEFAULT_VLM_MODEL_ENV)
+    if not model_name:
+        raise ValueError(f"Set {DEFAULT_VLM_MODEL_ENV} or pass --vlm-model.")
+    return model_name
 
 def set_log_verbose(verbose: bool) -> None:
     """Set global log verbosity level"""
@@ -119,7 +127,7 @@ def safe_get_token_usage(response) -> Optional[Dict[str, int]]:
                 'total_tokens': getattr(response.usage, 'total_tokens', 0)
             }
             
-            # Extract cache-related fields from prompt_tokens_details (OpenRouter/Gemini format)
+            # Extract cache-related fields from prompt_tokens_details (OpenRouter-compatible VLM format)
             cached_tokens = 0
             cache_discount = 0.0
             

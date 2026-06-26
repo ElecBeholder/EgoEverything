@@ -15,7 +15,7 @@ The system consists of the following core modules:
 - **object_sampler.py**: Integrated keyframe extraction, object detection, CLIP-based clustering, and gaze-based object selection
 - **qa_generator.py**: Question-answer generation with tool calling and MCQ refinement
 - **qa_reviewer.py**: Automated quality review and feedback system
-- **object_detector.py**: Gemini-based object detection
+- **object_detector.py**: VLM-based object detection
 - **frame_extractor.py**: Frame extraction and video clustering utilities
 - **main.py**: Main pipeline orchestration with multi-threading
 
@@ -48,6 +48,7 @@ bash example_config.sh
 
 Edit `example_config.sh` to configure:
 - API key
+- VLM model
 - Dataset paths
 - Question generation parameters
 - Number of parallel threads
@@ -60,6 +61,7 @@ Generate VQAs for multiple videos:
 ```bash
 python main.py \
     --api-key "your-openrouter-api-key" \
+    --vlm-model "$VLM_MODEL" \
     --dataset-path "/path/to/dataset" \
     --json-path "/path/to/dataset.json" \
     --dataset-name "AriaEveryday_Activities" \
@@ -75,7 +77,8 @@ python main.py \
 ### Parameters
 
 **Required:**
-- `--api-key`: OpenRouter API key for accessing Gemini models
+- `--api-key`: OpenRouter API key for accessing VLM models
+- `--vlm-model`: VLM model name. If omitted, the pipeline reads `VLM_MODEL` from the environment.
 - `--dataset-path`: Path to the dataset directory containing video folders
 - `--json-path`: Path to the JSON file containing video metadata
 - `--dataset-name`: Dataset name (used for output filename)
@@ -97,6 +100,7 @@ Test the pipeline on a single video:
 ```bash
 python main.py test \
     --api-key "your-api-key" \
+    --vlm-model "$VLM_MODEL" \
     --video-path "/path/to/video.mp4" \
     --sequence-id "video_id" \
     --temp-dir "tmp" \
@@ -112,7 +116,8 @@ Each module can be tested independently:
 python object_sampler.py \
     --video-path "/path/to/video.mp4" \
     --api-key "your-api-key" \
-    --num-samples 5 \
+    --vlm-model "$VLM_MODEL" \
+    --num-key-objects 5 \
     --temp-dir "tmp"
 ```
 
@@ -120,6 +125,7 @@ python object_sampler.py \
 ```bash
 python object_detector.py \
     --api-key "your-api-key" \
+    --vlm-model "$VLM_MODEL" \
     --image-path "/path/to/image.jpg" \
     --visualize
 ```
@@ -128,6 +134,7 @@ python object_detector.py \
 ```bash
 python qa_generator.py \
     --api-key "your-api-key" \
+    --vlm-model "$VLM_MODEL" \
     --video-path "/path/to/video.mp4" \
     --timestamp 30.0 \
     --temp-dir "tmp"
@@ -237,7 +244,7 @@ The pipeline generates a JSON file containing:
 
 ### 1. Object Sampling & Selection
 - Extract keyframes based on `sampling_density` (e.g., 60 = ~1 frame/sec)
-- Detect objects in each keyframe using Gemini API
+- Detect objects in each keyframe using VLM API
 - Cluster similar objects using CLIP features
 - Select focus objects based on gaze data (if available) or random sampling
 - Generate `question_factor × unique_objects` questions
